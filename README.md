@@ -86,6 +86,8 @@ The panel talks directly to the node. No extra backend is needed.
 - `send <tekst>`
 - `ping`
 - `cad`
+- `sweep`
+- `sightings`
 - `beacon on`
 - `beacon off`
 - `beacon now`
@@ -167,6 +169,26 @@ Home Assistant discovery currently publishes:
 - button: beacon now
 
 The discovery payloads are retained. Once your HA broker is configured, the entities should appear automatically after `mqtt on` and `mqtt connect`.
+
+## Seeing other LoRa devices
+
+There are now two different visibility layers in the web panel:
+
+- decoded Esplora nodes: modules speaking the same packet format on the same current LoRa settings
+- ether activity: raw packet sightings and sweep hits from common EU868 presets
+
+Useful checks:
+
+- `cad` checks only the current exact channel/profile
+- `sweep` rotates over common EU868 frequencies and profiles to detect generic LoRa preambles
+- `sightings` prints the current raw/sweep detections on serial
+
+If `sweep` still reports zero hits, it usually means one of these:
+
+- no nearby LoRa traffic at the moment
+- other devices use a different regional band
+- traffic is too sparse to catch in the short sweep window
+- nearby devices are not using LoRa modulation at all
 
 ## Notes about "nearby nodes"
 

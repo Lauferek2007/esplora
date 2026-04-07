@@ -97,6 +97,9 @@ class EsploraConsole(cmd.Cmd):
     def do_neighbors(self, arg: str) -> None:
         self.send_line("neighbors")
 
+    def do_sightings(self, arg: str) -> None:
+        self.send_line("sightings")
+
     def do_nodes(self, arg: str) -> None:
         if not self.nodes:
             print("(brak node'ow w cache)")
@@ -116,6 +119,9 @@ class EsploraConsole(cmd.Cmd):
 
     def do_cad(self, arg: str) -> None:
         self.send_line("cad")
+
+    def do_sweep(self, arg: str) -> None:
+        self.send_line("sweep")
 
     def do_beacon(self, arg: str) -> None:
         self.send_line(f"beacon {arg}".strip())

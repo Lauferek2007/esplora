@@ -21,6 +21,7 @@ constexpr uint32_t MQTT_STATE_INTERVAL_MS = 10000;
 constexpr size_t MAX_NEIGHBORS = 16;
 constexpr size_t MAX_NAME_LEN = 16;
 constexpr size_t MAX_MSG_LEN = 80;
+constexpr size_t MAX_SIGHTINGS = 24;
 constexpr size_t MAX_LOG_ENTRIES = 64;
 constexpr size_t MAX_LOG_LINE_LEN = 192;
 constexpr uint8_t PROTOCOL_VERSION = 1;
@@ -69,6 +70,24 @@ struct Neighbor {
   long freqErrHz = 0;
   int8_t txPower = 0;
   char lastKind = '?';
+};
+
+struct AirSighting {
+  bool used = false;
+  bool decoded = false;
+  char signature[49] = {0};
+  char type[8] = {0};
+  char label[41] = {0};
+  char note[81] = {0};
+  uint32_t lastSeenMs = 0;
+  uint32_t hits = 0;
+  float frequencyMhz = 0.0f;
+  float bandwidthKhz = 0.0f;
+  uint8_t spreadingFactor = 0;
+  uint8_t codingRate = 0;
+  float rssi = NAN;
+  float snr = NAN;
+  long freqErrHz = 0;
 };
 
 struct ProbeConfig {
@@ -141,6 +160,7 @@ const ProbeConfig PROBES[] = {
 
 RadioConfig gConfig;
 Neighbor gNeighbors[MAX_NEIGHBORS];
+AirSighting gSightings[MAX_SIGHTINGS];
 WifiConfig gWifiConfig;
 MqttConfig gMqttConfig;
 LogEntry gLogEntries[MAX_LOG_ENTRIES];
@@ -160,12 +180,16 @@ bool gWebServerStarted = false;
 bool gMqttDiscoveryPublished = false;
 bool gMqttStateDirty = true;
 bool gMqttNeighborsDirty = true;
+bool gSweepActive = false;
 uint32_t gLastBeaconAt = 0;
 uint32_t gNextSequence = 1;
 uint32_t gLastLogSequence = 0;
 uint32_t gLastMqttReconnectAt = 0;
 uint32_t gLastMqttStateAt = 0;
 uint32_t gLastRxAt = 0;
+uint32_t gLastSweepAt = 0;
+uint16_t gLastSweepChecks = 0;
+uint16_t gLastSweepHits = 0;
 
 uint32_t gNodeId = 0;
 char gNodeIdText[9] = {0};
@@ -185,6 +209,16 @@ size_t countNeighbors() {
   size_t count = 0;
   for (const Neighbor& neighbor : gNeighbors) {
     if (neighbor.used) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+size_t countSightings() {
+  size_t count = 0;
+  for (const AirSighting& sighting : gSightings) {
+    if (sighting.used) {
       ++count;
     }
   }
@@ -260,6 +294,7 @@ void mqttPublishEventLine(const String& line);
 void mqttEnsureConnected();
 void mqttLoop();
 void ensureWebServerState();
+bool reconfigureRadio();
 
 String sanitizeName(const String& raw) {
   String out;
@@ -551,6 +586,76 @@ Neighbor* allocateNeighbor(const String& nodeId) {
   return &gNeighbors[oldestIndex];
 }
 
+AirSighting* findSighting(const String& signature) {
+  for (size_t i = 0; i < MAX_SIGHTINGS; ++i) {
+    if (gSightings[i].used && signature.equals(gSightings[i].signature)) {
+      return &gSightings[i];
+    }
+  }
+  return nullptr;
+}
+
+AirSighting* allocateSighting(const String& signature) {
+  if (AirSighting* existing = findSighting(signature)) {
+    return existing;
+  }
+
+  for (size_t i = 0; i < MAX_SIGHTINGS; ++i) {
+    if (!gSightings[i].used) {
+      gSightings[i].used = true;
+      copyString(gSightings[i].signature, sizeof(gSightings[i].signature), signature);
+      return &gSightings[i];
+    }
+  }
+
+  size_t oldestIndex = 0;
+  for (size_t i = 1; i < MAX_SIGHTINGS; ++i) {
+    if (gSightings[i].lastSeenMs < gSightings[oldestIndex].lastSeenMs) {
+      oldestIndex = i;
+    }
+  }
+  gSightings[oldestIndex] = AirSighting{};
+  gSightings[oldestIndex].used = true;
+  copyString(gSightings[oldestIndex].signature, sizeof(gSightings[oldestIndex].signature), signature);
+  return &gSightings[oldestIndex];
+}
+
+void rememberSighting(
+  const String& signature,
+  const String& type,
+  const String& label,
+  const String& note,
+  float frequencyMhz,
+  float bandwidthKhz,
+  uint8_t spreadingFactor,
+  uint8_t codingRate,
+  float rssi,
+  float snr,
+  long freqErrHz,
+  bool decoded
+) {
+  AirSighting* sighting = allocateSighting(signature);
+  if (sighting == nullptr) {
+    return;
+  }
+
+  sighting->used = true;
+  sighting->decoded = decoded;
+  sighting->lastSeenMs = millis();
+  sighting->hits += 1;
+  sighting->frequencyMhz = frequencyMhz;
+  sighting->bandwidthKhz = bandwidthKhz;
+  sighting->spreadingFactor = spreadingFactor;
+  sighting->codingRate = codingRate;
+  sighting->rssi = rssi;
+  sighting->snr = snr;
+  sighting->freqErrHz = freqErrHz;
+  copyString(sighting->type, sizeof(sighting->type), type);
+  copyString(sighting->label, sizeof(sighting->label), label);
+  copyString(sighting->note, sizeof(sighting->note), note);
+  markMqttStateDirty();
+}
+
 void printNeighbor(const Neighbor& neighbor) {
   String details = "ID=" + String(neighbor.id);
   details += "|NAME=" + String(neighbor.name);
@@ -576,6 +681,35 @@ void printNeighbors() {
   }
   if (!any) {
     emitLine("NODE|EMPTY=1");
+  }
+}
+
+void printSighting(const AirSighting& sighting) {
+  String details = "TYPE=" + String(sighting.type);
+  details += "|LABEL=" + String(sighting.label);
+  details += "|NOTE=" + String(sighting.note);
+  details += "|AGE_S=" + String((millis() - sighting.lastSeenMs) / 1000U);
+  details += "|HITS=" + String(sighting.hits);
+  details += "|FREQ=" + String(sighting.frequencyMhz, 3);
+  details += "|BW=" + String(sighting.bandwidthKhz, 1);
+  details += "|SF=" + String(sighting.spreadingFactor);
+  details += "|CR=" + String(sighting.codingRate);
+  details += "|RSSI=" + (isfinite(sighting.rssi) ? String(sighting.rssi, 1) : String("-"));
+  details += "|SNR=" + (isfinite(sighting.snr) ? String(sighting.snr, 1) : String("-"));
+  emitLine("SEEN|" + details);
+}
+
+void printSightings() {
+  bool any = false;
+  for (size_t i = 0; i < MAX_SIGHTINGS; ++i) {
+    if (!gSightings[i].used) {
+      continue;
+    }
+    any = true;
+    printSighting(gSightings[i]);
+  }
+  if (!any) {
+    emitLine("SEEN|EMPTY=1");
   }
 }
 
@@ -614,6 +748,14 @@ String buildStatusJson() {
   appendJsonQuoted(out, String(gConfig.profile));
   out += ",\"uptimeSec\":";
   out += String(millis() / 1000U);
+  out += ",\"sightingCount\":";
+  out += String(countSightings());
+  out += ",\"lastSweepChecks\":";
+  out += String(gLastSweepChecks);
+  out += ",\"lastSweepHits\":";
+  out += String(gLastSweepHits);
+  out += ",\"lastSweepAgeSec\":";
+  out += gLastSweepAt > 0 ? String((millis() - gLastSweepAt) / 1000U) : "null";
   out += '}';
 
   out += ",\"wifi\":{";
@@ -740,23 +882,74 @@ String buildLogsJson(uint32_t since) {
   return out;
 }
 
+String buildSightingsJson() {
+  String out;
+  out.reserve(2600);
+  out += '[';
+  bool first = true;
+  for (const AirSighting& sighting : gSightings) {
+    if (!sighting.used) {
+      continue;
+    }
+    if (!first) {
+      out += ',';
+    }
+    first = false;
+    out += '{';
+    out += "\"type\":";
+    appendJsonQuoted(out, String(sighting.type));
+    out += ",\"label\":";
+    appendJsonQuoted(out, String(sighting.label));
+    out += ",\"note\":";
+    appendJsonQuoted(out, String(sighting.note));
+    out += ",\"ageSec\":";
+    out += String((millis() - sighting.lastSeenMs) / 1000U);
+    out += ",\"hits\":";
+    out += String(sighting.hits);
+    out += ",\"frequencyMhz\":";
+    out += String(sighting.frequencyMhz, 3);
+    out += ",\"bandwidthKhz\":";
+    out += String(sighting.bandwidthKhz, 1);
+    out += ",\"spreadingFactor\":";
+    out += String(sighting.spreadingFactor);
+    out += ",\"codingRate\":";
+    out += String(sighting.codingRate);
+    out += ",\"decoded\":";
+    out += sighting.decoded ? "true" : "false";
+    out += ",\"rssi\":";
+    out += isfinite(sighting.rssi) ? String(sighting.rssi, 1) : "null";
+    out += ",\"snr\":";
+    out += isfinite(sighting.snr) ? String(sighting.snr, 1) : "null";
+    out += ",\"freqErrHz\":";
+    out += isfinite(sighting.rssi) ? String(sighting.freqErrHz) : "null";
+    out += '}';
+  }
+  out += ']';
+  return out;
+}
+
 String buildApiStateJson(uint32_t since) {
   String out;
   String statusJson = buildStatusJson();
   String neighborsJson = buildNeighborsJson();
+  String sightingsJson = buildSightingsJson();
   String logsJson = buildLogsJson(since);
-  out.reserve(statusJson.length() + neighborsJson.length() + logsJson.length() + 128);
+  out.reserve(statusJson.length() + neighborsJson.length() + sightingsJson.length() + logsJson.length() + 160);
   out += '{';
   out += "\"nowMs\":";
   out += String(millis());
   out += ",\"neighborCount\":";
   out += String(countNeighbors());
+  out += ",\"sightingCount\":";
+  out += String(countSightings());
   out += ",\"lastLogSeq\":";
   out += String(gLastLogSequence);
   out += ",\"payload\":";
   out += statusJson;
   out += ",\"neighbors\":";
   out += neighborsJson;
+  out += ",\"sightings\":";
+  out += sightingsJson;
   out += ",\"logs\":";
   out += logsJson;
   out += '}';
@@ -1059,11 +1252,13 @@ bool configureRadioForPinMap(const PinMap& pinMap) {
   for (const ProbeConfig& probe : PROBES) {
     disposeRadio();
 
-    emitLog(
-      "probe pinmap=" + String(pinMap.key) +
-      " tcxo=" + String(probe.tcxoVoltage, 1) +
-      " ldo=" + String(probe.useRegulatorLDO ? 1 : 0)
-    );
+    if (!gSweepActive) {
+      emitLog(
+        "probe pinmap=" + String(pinMap.key) +
+        " tcxo=" + String(probe.tcxoVoltage, 1) +
+        " ldo=" + String(probe.useRegulatorLDO ? 1 : 0)
+      );
+    }
 
     gModule = new Module(
       pinMap.cs,
@@ -1097,11 +1292,13 @@ bool configureRadioForPinMap(const PinMap& pinMap) {
 
     state = gRadio->setDio2AsRfSwitch(true);
     if (state != RADIOLIB_ERR_NONE) {
-      emitWarn(
-        "setDio2AsRfSwitch failed on pinmap=" + String(pinMap.key) +
-        " probe=" + String(probe.key) +
-        " code=" + String(state)
-      );
+      if (!gSweepActive) {
+        emitWarn(
+          "setDio2AsRfSwitch failed on pinmap=" + String(pinMap.key) +
+          " probe=" + String(probe.key) +
+          " code=" + String(state)
+        );
+      }
     }
 
     gRadio->setPacketReceivedAction(onPacketReceived);
@@ -1116,16 +1313,18 @@ bool configureRadioForPinMap(const PinMap& pinMap) {
     gRadioReady = true;
     gLastBeaconAt = millis();
     markMqttStateDirty(true);
-    emitEvent(
-      "RADIO",
-      "READY=1|PINMAP=" + String(pinMap.key) +
-      "|PROBE=" + String(probe.key) +
-      "|FREQ=" + String(gConfig.frequencyMhz, 3) +
-      "|BW=" + String(gConfig.bandwidthKhz, 1) +
-      "|SF=" + String(gConfig.spreadingFactor) +
-      "|CR=" + String(gConfig.codingRate) +
-      "|TX=" + String(gConfig.txPower)
-    );
+    if (!gSweepActive) {
+      emitEvent(
+        "RADIO",
+        "READY=1|PINMAP=" + String(pinMap.key) +
+        "|PROBE=" + String(probe.key) +
+        "|FREQ=" + String(gConfig.frequencyMhz, 3) +
+        "|BW=" + String(gConfig.bandwidthKhz, 1) +
+        "|SF=" + String(gConfig.spreadingFactor) +
+        "|CR=" + String(gConfig.codingRate) +
+        "|TX=" + String(gConfig.txPower)
+      );
+    }
     return true;
   }
 
@@ -1395,6 +1594,28 @@ void handleKnownFrame(const String& packet, float rssi, float snr, long freqErrH
 }
 
 void handleUnknownFrame(const String& packet, float rssi, float snr, long freqErrHz) {
+  String rawHex = hexEncode(packet);
+  String note = previewText(packet, 28);
+  if (note.isEmpty()) {
+    note = rawHex.substring(0, rawHex.length() > 28 ? 28 : rawHex.length());
+  }
+  rememberSighting(
+    "RAW|" + String(gConfig.frequencyMhz, 3) +
+      "|" + String(gConfig.bandwidthKhz, 1) +
+      "|" + String(gConfig.spreadingFactor) +
+      "|" + rawHex.substring(0, rawHex.length() > 12 ? 12 : rawHex.length()),
+    "RAW",
+    String(gConfig.frequencyMhz, 3) + " MHz / SF" + String(gConfig.spreadingFactor),
+    note,
+    gConfig.frequencyMhz,
+    gConfig.bandwidthKhz,
+    gConfig.spreadingFactor,
+    gConfig.codingRate,
+    rssi,
+    snr,
+    freqErrHz,
+    false
+  );
   updateLastRx('R', "RAW", previewText(packet), rssi, snr, freqErrHz);
   if (!gConfig.rawLoggingEnabled) {
     return;
@@ -1456,6 +1677,8 @@ void printStatus() {
   line += "|PROFILE=" + String(gConfig.profile);
   line += "|WIFI=" + String(WiFi.status() == WL_CONNECTED ? 1 : 0);
   line += "|IP=" + String(WiFi.status() == WL_CONNECTED ? ipToString(WiFi.localIP()) : ipToString(gWifiConfig.localIp));
+  line += "|SEEN=" + String(countSightings());
+  line += "|SWEEP_HITS=" + String(gLastSweepHits);
   emitLine(line);
 }
 
@@ -1491,27 +1714,130 @@ bool applyProfile(const String& profileName) {
   return false;
 }
 
+enum class CadScanResult {
+  Busy,
+  Free,
+  Error,
+};
+
+CadScanResult runCadScan(bool emitResult) {
+  if (!gRadioReady || gRadio == nullptr) {
+    emitError("radio not ready");
+    return CadScanResult::Error;
+  }
+
+  int16_t state = gRadio->scanChannel();
+  if (state == RADIOLIB_LORA_DETECTED) {
+    if (emitResult) {
+      emitEvent("CAD", "BUSY=1");
+    }
+    restartReceive();
+    return CadScanResult::Busy;
+  }
+  if (state == RADIOLIB_CHANNEL_FREE) {
+    if (emitResult) {
+      emitEvent("CAD", "BUSY=0");
+    }
+    restartReceive();
+    return CadScanResult::Free;
+  }
+
+  emitError("cad failed, code=" + String(state));
+  restartReceive();
+  return CadScanResult::Error;
+}
+
 bool runCad() {
+  return runCadScan(true) != CadScanResult::Error;
+}
+
+bool runSweep() {
+  struct SweepPreset {
+    float frequencyMhz;
+    float bandwidthKhz;
+    uint8_t spreadingFactor;
+    uint8_t codingRate;
+    const char* label;
+  };
+
+  static const SweepPreset PRESETS[] = {
+    {868.1f, 125.0f, 7, 5, "EU868 fast"},
+    {868.1f, 125.0f, 9, 7, "EU868 balanced"},
+    {868.1f, 125.0f, 11, 8, "EU868 long"},
+    {868.3f, 125.0f, 7, 5, "EU868 fast"},
+    {868.3f, 125.0f, 9, 7, "EU868 balanced"},
+    {868.3f, 125.0f, 11, 8, "EU868 long"},
+    {868.5f, 125.0f, 7, 5, "EU868 fast"},
+    {868.5f, 125.0f, 9, 7, "EU868 balanced"},
+    {868.5f, 125.0f, 11, 8, "EU868 long"},
+    {867.1f, 125.0f, 9, 7, "EU867 balanced"},
+    {867.3f, 125.0f, 9, 7, "EU867 balanced"},
+    {867.5f, 125.0f, 9, 7, "EU867 balanced"},
+    {867.7f, 125.0f, 9, 7, "EU867 balanced"},
+    {867.9f, 125.0f, 9, 7, "EU867 balanced"},
+    {869.525f, 125.0f, 9, 7, "EU869 balanced"},
+  };
+
   if (!gRadioReady || gRadio == nullptr) {
     emitError("radio not ready");
     return false;
   }
 
-  int16_t state = gRadio->scanChannel();
-  if (state == RADIOLIB_LORA_DETECTED) {
-    emitEvent("CAD", "BUSY=1");
-    restartReceive();
-    return true;
-  }
-  if (state == RADIOLIB_CHANNEL_FREE) {
-    emitEvent("CAD", "BUSY=0");
-    restartReceive();
-    return true;
+  RadioConfig saved = gConfig;
+  uint16_t checks = 0;
+  uint16_t hits = 0;
+  emitEvent("SWEEP", "STATE=START|PRESETS=" + String(static_cast<uint32_t>(sizeof(PRESETS) / sizeof(PRESETS[0]))));
+  gSweepActive = true;
+
+  for (const SweepPreset& preset : PRESETS) {
+    gConfig.frequencyMhz = preset.frequencyMhz;
+    gConfig.bandwidthKhz = preset.bandwidthKhz;
+    gConfig.spreadingFactor = preset.spreadingFactor;
+    gConfig.codingRate = preset.codingRate;
+    if (!reconfigureRadio()) {
+      emitWarn(
+        "sweep reconfigure failed at " +
+        String(preset.frequencyMhz, 3) + " MHz SF" + String(preset.spreadingFactor)
+      );
+      continue;
+    }
+
+    ++checks;
+    CadScanResult result = runCadScan(false);
+    if (result == CadScanResult::Busy) {
+      ++hits;
+      rememberSighting(
+        "CAD|" + String(preset.frequencyMhz, 3) + "|" + String(preset.bandwidthKhz, 1) + "|" + String(preset.spreadingFactor),
+        "CAD",
+        String(preset.frequencyMhz, 3) + " MHz / SF" + String(preset.spreadingFactor),
+        String(preset.label) + " busy",
+        preset.frequencyMhz,
+        preset.bandwidthKhz,
+        preset.spreadingFactor,
+        preset.codingRate,
+        NAN,
+        NAN,
+        0,
+        false
+      );
+    }
+    delay(12);
   }
 
-  emitError("cad failed, code=" + String(state));
-  restartReceive();
-  return false;
+  gSweepActive = false;
+  gConfig = saved;
+  bool restored = reconfigureRadio();
+  gLastSweepAt = millis();
+  gLastSweepChecks = checks;
+  gLastSweepHits = hits;
+  markMqttStateDirty();
+  emitEvent("SWEEP", "STATE=DONE|CHECKS=" + String(checks) + "|HITS=" + String(hits));
+
+  if (!restored) {
+    emitError("sweep restore failed");
+    return false;
+  }
+  return true;
 }
 
 void printHelp() {
@@ -1543,6 +1869,8 @@ void printHelp() {
   emitLine("HELP|mqtt connect");
   emitLine("HELP|mqtt ha on|off|toggle");
   emitLine("HELP|cad");
+  emitLine("HELP|sweep");
+  emitLine("HELP|sightings");
   emitLine("HELP|restart radio");
 }
 
@@ -1579,6 +1907,11 @@ void handleCommand(const String& input) {
     return;
   }
 
+  if (line.equalsIgnoreCase("sightings")) {
+    printSightings();
+    return;
+  }
+
   if (line.equalsIgnoreCase("ping")) {
     String nonce = String(millis());
     sendPing(nonce);
@@ -1587,6 +1920,11 @@ void handleCommand(const String& input) {
 
   if (line.equalsIgnoreCase("cad")) {
     runCad();
+    return;
+  }
+
+  if (line.equalsIgnoreCase("sweep")) {
+    runSweep();
     return;
   }
 

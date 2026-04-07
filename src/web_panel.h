@@ -8,7 +8,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Esplora LoRa Lab</title>
+  <title>Esplora LoRa Panel</title>
   <style>
     :root {
       --bg: #061017;
@@ -312,8 +312,99 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
     .scanner {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
       gap: 14px;
+    }
+
+    .table-wrap {
+      overflow: auto;
+      border-radius: 18px;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      background: rgba(5, 13, 18, 0.52);
+    }
+
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 720px;
+      font-size: 13px;
+    }
+
+    .data-table th,
+    .data-table td {
+      padding: 12px 14px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      text-align: left;
+      vertical-align: middle;
+    }
+
+    .data-table th {
+      color: var(--accent-soft);
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    .data-table tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .data-table tbody tr:hover {
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    .row-title {
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+
+    .row-sub {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 12px;
+      font-family: var(--mono);
+    }
+
+    .row-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 52px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .row-badge.raw {
+      color: var(--warn);
+      border-color: rgba(255, 209, 102, 0.28);
+      background: rgba(255, 209, 102, 0.10);
+    }
+
+    .row-badge.cad {
+      color: var(--teal);
+      border-color: rgba(55, 212, 197, 0.28);
+      background: rgba(55, 212, 197, 0.10);
+    }
+
+    .row-badge.node {
+      color: var(--green);
+      border-color: rgba(155, 229, 100, 0.28);
+      background: rgba(155, 229, 100, 0.10);
+    }
+
+    .empty-state {
+      padding: 18px;
+      border-radius: 18px;
+      color: var(--muted);
+      line-height: 1.6;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      background: rgba(255, 255, 255, 0.03);
     }
 
     .node-card {
@@ -524,45 +615,45 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     <section class="hero">
       <div class="hero-top">
         <div>
-          <p class="eyebrow">LoRa Lab Node</p>
-          <h1 id="hero-title">Esplora Control Deck</h1>
+          <p class="eyebrow">Węzeł LoRa</p>
+          <h1 id="hero-title">Esplora Panel Sterowania</h1>
           <p class="subtitle">
-            Live control surface for your XIAO ESP32S3 + Wio-SX1262 node. Watch the ether,
-            chat over LoRa, inspect nearby nodes, and bridge the telemetry into Home Assistant over MQTT.
+            Panel na żywo dla XIAO ESP32S3 + Wio-SX1262. Możesz tu nadawać wiadomości LoRa,
+            sprawdzać sąsiednie moduły, podglądać aktywność w eterze i mostkować telemetrię do Home Assistant po MQTT.
           </p>
           <div class="hero-badges">
-            <div class="badge"><strong>Node</strong> <span id="badge-id">-</span></div>
+            <div class="badge"><strong>Node ID</strong> <span id="badge-id">-</span></div>
             <div class="badge"><strong>IP</strong> <span id="badge-ip">-</span></div>
-            <div class="badge"><strong>Profile</strong> <span id="badge-profile">-</span></div>
-            <div class="badge"><strong>Air</strong> <span id="badge-air">868.100 / SF9</span></div>
+            <div class="badge"><strong>Profil</strong> <span id="badge-profile">-</span></div>
+            <div class="badge"><strong>Eter</strong> <span id="badge-air">868.100 / SF9</span></div>
           </div>
         </div>
         <div class="chip-row">
           <div class="pill"><span class="dot" id="dot-radio"></span> <span id="pill-radio">Radio offline</span></div>
-          <div class="pill"><span class="dot" id="dot-wifi"></span> <span id="pill-wifi">Wi-Fi idle</span></div>
-          <div class="pill"><span class="dot" id="dot-mqtt"></span> <span id="pill-mqtt">MQTT idle</span></div>
+          <div class="pill"><span class="dot" id="dot-wifi"></span> <span id="pill-wifi">Wi‑Fi bez połączenia</span></div>
+          <div class="pill"><span class="dot" id="dot-mqtt"></span> <span id="pill-mqtt">MQTT nieaktywne</span></div>
         </div>
       </div>
       <div class="stats">
         <article class="stat">
-          <div class="stat-label">Neighbors</div>
+          <div class="stat-label">Sąsiedzi</div>
           <div class="stat-value" id="stat-neighbors">0</div>
-          <div class="stat-meta" id="stat-neighbors-meta">No compatible nodes yet</div>
+          <div class="stat-meta" id="stat-neighbors-meta">Brak kompatybilnych modułów</div>
         </article>
         <article class="stat">
-          <div class="stat-label">Wi-Fi RSSI</div>
+          <div class="stat-label">Wi‑Fi RSSI</div>
           <div class="stat-value" id="stat-wifi-rssi">--</div>
-          <div class="stat-meta" id="stat-wifi-meta">Waiting for STA link</div>
+          <div class="stat-meta" id="stat-wifi-meta">Czekam na połączenie STA</div>
         </article>
         <article class="stat">
-          <div class="stat-label">Last RX</div>
+          <div class="stat-label">Ostatni RX</div>
           <div class="stat-value" id="stat-last-rx">--</div>
-          <div class="stat-meta" id="stat-last-rx-meta">Nothing decoded yet</div>
+          <div class="stat-meta" id="stat-last-rx-meta">Nic jeszcze nie zdekodowano</div>
         </article>
         <article class="stat">
           <div class="stat-label">Uptime</div>
           <div class="stat-value" id="stat-uptime">--</div>
-          <div class="stat-meta" id="stat-uptime-meta">Fresh boot</div>
+          <div class="stat-meta" id="stat-uptime-meta">Świeży start</div>
         </article>
       </div>
     </section>
@@ -573,19 +664,19 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
           <div class="panel-head">
             <div>
               <h2>LoRa Chat</h2>
-              <div class="panel-sub">Send a short message into the ether or probe for another Esplora node.</div>
+              <div class="panel-sub">Wyślij krótką wiadomość LoRa albo sprawdź, czy odpowiada inny moduł Esplora.</div>
             </div>
             <div class="inline-actions">
               <button class="secondary" id="ping-btn" type="button">Ping</button>
-              <button class="ghost" id="beacon-now-btn" type="button">Beacon Now</button>
+              <button class="ghost" id="beacon-now-btn" type="button">Nadaj Beacon</button>
             </div>
           </div>
           <div class="panel-body">
             <div class="chat-layout">
-              <textarea id="chat-text" maxlength="80" placeholder="Type a short LoRa message, then send it."></textarea>
-              <button id="send-btn" type="button">Send Message</button>
+              <textarea id="chat-text" maxlength="80" placeholder="Wpisz krótką wiadomość LoRa i wyślij ją w eter."></textarea>
+              <button id="send-btn" type="button">Wyślij</button>
             </div>
-            <p class="mini-note">Messages are short by design. LoRa rewards discipline: lower payload size means less airtime and better coexistence.</p>
+            <p class="mini-note">Wiadomości są celowo krótkie. Im mniejszy pakiet LoRa, tym krótszy czas zajęcia eteru i większa szansa, że inni też się przebiją.</p>
           </div>
         </section>
 
@@ -593,12 +684,18 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
           <div class="panel-head">
             <div>
               <h2>Scanner</h2>
-              <div class="panel-sub">Compatible nodes detected on the current LoRa settings.</div>
+              <div class="panel-sub">Tu masz dwie rzeczy: zdekodowane węzły Esplora oraz ogólną aktywność LoRa wykrytą na popularnych ustawieniach EU868.</div>
             </div>
-            <button class="secondary" id="cad-btn" type="button">CAD Scan</button>
+            <div class="inline-actions">
+              <button class="secondary" id="cad-btn" type="button">CAD (Kanał)</button>
+              <button class="ghost" id="sweep-btn" type="button">Szybki Sweep</button>
+            </div>
           </div>
           <div class="panel-body">
+            <div class="mini-note" id="scanner-summary">Węzły Esplora zdekodowane na dokładnie tym samym profilu radiowym.</div>
             <div class="scanner" id="scanner"></div>
+            <div class="mini-note" id="sightings-summary" style="margin-top:14px;">Tu pojawią się surowe wykrycia i trafienia sweepu, nawet jeśli obcy moduł nie używa protokołu Esplora.</div>
+            <div class="scanner" id="sightings"></div>
           </div>
         </section>
 
@@ -606,10 +703,10 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
           <div class="panel-head">
             <div>
               <h2>Live Tape</h2>
-              <div class="panel-sub">Recent radio, Wi-Fi and command events from the node.</div>
+              <div class="panel-sub">Ostatnie zdarzenia z radia, Wi‑Fi, MQTT i komend.</div>
             </div>
             <div class="inline-actions">
-              <button class="ghost" id="clear-log-btn" type="button">Clear View</button>
+              <button class="ghost" id="clear-log-btn" type="button">Wyczyść Widok</button>
             </div>
           </div>
           <div class="panel-body">
@@ -623,21 +720,21 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
           <div class="panel-head">
             <div>
               <h2>Radio Controls</h2>
-              <div class="panel-sub">Fast profile shifts and radio toggles without touching serial.</div>
+              <div class="panel-sub">Szybka zmiana profilu LoRa i przełączników bez wchodzenia na port szeregowy.</div>
             </div>
           </div>
           <div class="panel-body">
             <div class="chip-row" id="profile-row">
-              <button class="chip" data-profile="fast" type="button">Fast</button>
-              <button class="chip" data-profile="balanced" type="button">Balanced</button>
-              <button class="chip" data-profile="long" type="button">Long Range</button>
+              <button class="chip" data-profile="fast" type="button">Szybki</button>
+              <button class="chip" data-profile="balanced" type="button">Zrównoważony</button>
+              <button class="chip" data-profile="long" type="button">Daleki Zasięg</button>
             </div>
             <div class="control-grid" style="margin-top:14px;">
               <div class="inline-actions">
-                <button class="secondary" id="beacon-toggle-btn" type="button">Toggle Beacon</button>
-                <button class="ghost" id="raw-toggle-btn" type="button">Toggle Raw Logs</button>
+                <button class="secondary" id="beacon-toggle-btn" type="button">Przełącz Beacon</button>
+                <button class="ghost" id="raw-toggle-btn" type="button">Przełącz RAW</button>
               </div>
-              <div class="mini-note" id="radio-summary">Waiting for state.</div>
+              <div class="mini-note" id="radio-summary">Czekam na stan radia.</div>
             </div>
           </div>
         </section>
@@ -646,18 +743,18 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
           <div class="panel-head">
             <div>
               <h2>Wi-Fi</h2>
-              <div class="panel-sub">Static IP target is fixed in firmware at <span class="mono">192.168.1.201</span>.</div>
+              <div class="panel-sub">Stałe IP jest wpisane w firmware: <span class="mono">192.168.1.201</span>.</div>
             </div>
           </div>
           <div class="panel-body">
             <div class="config-grid">
-              <input id="wifi-ssid" placeholder="SSID">
-              <input id="wifi-pass" placeholder="Password" type="password">
+              <input id="wifi-ssid" placeholder="Nazwa sieci Wi‑Fi (SSID)">
+              <input id="wifi-pass" placeholder="Hasło Wi‑Fi" type="password">
               <div class="inline-actions">
-                <button id="wifi-save-btn" type="button">Save + Connect</button>
-                <button class="ghost" id="wifi-off-btn" type="button">Wi-Fi Off</button>
+                <button id="wifi-save-btn" type="button">Zapisz i Połącz</button>
+                <button class="ghost" id="wifi-off-btn" type="button">Wyłącz Wi‑Fi</button>
               </div>
-              <div class="mini-note" id="wifi-summary">No STA link yet.</div>
+              <div class="mini-note" id="wifi-summary">Brak połączenia STA.</div>
             </div>
           </div>
         </section>
@@ -666,31 +763,31 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
           <div class="panel-head">
             <div>
               <h2>MQTT / Home Assistant</h2>
-              <div class="panel-sub">Configure the broker, then let the node publish telemetry and discovery topics for HA.</div>
+              <div class="panel-sub">Ustaw broker, a moduł zacznie publikować telemetrię i discovery dla Home Assistant.</div>
             </div>
           </div>
           <div class="panel-body">
             <div class="config-grid">
-              <input id="mqtt-host" placeholder="Broker host or IP">
+              <input id="mqtt-host" placeholder="Host lub IP brokera MQTT">
               <div class="chat-layout">
                 <input id="mqtt-port" placeholder="Port" type="number" min="1" max="65535">
-                <button class="secondary" id="mqtt-connect-btn" type="button">Connect</button>
+                <button class="secondary" id="mqtt-connect-btn" type="button">Połącz</button>
               </div>
-              <input id="mqtt-user" placeholder="Username">
-              <input id="mqtt-pass" placeholder="Password" type="password">
-              <input id="mqtt-topic" placeholder="Base topic, e.g. esplora/61AE3D98">
+              <input id="mqtt-user" placeholder="Użytkownik MQTT">
+              <input id="mqtt-pass" placeholder="Hasło MQTT" type="password">
+              <input id="mqtt-topic" placeholder="Temat bazowy, np. esplora/61AE3D98">
               <div class="inline-actions">
-                <button id="mqtt-save-btn" type="button">Save MQTT</button>
-                <button class="ghost" id="mqtt-toggle-btn" type="button">Enable / Disable</button>
-                <button class="ghost" id="mqtt-ha-btn" type="button">Toggle HA Discovery</button>
+                <button id="mqtt-save-btn" type="button">Zapisz MQTT</button>
+                <button class="ghost" id="mqtt-toggle-btn" type="button">Włącz / Wyłącz</button>
+                <button class="ghost" id="mqtt-ha-btn" type="button">Discovery HA</button>
               </div>
-              <div class="mini-note" id="mqtt-summary">Broker not configured.</div>
+              <div class="mini-note" id="mqtt-summary">Broker nie jest jeszcze ustawiony.</div>
             </div>
           </div>
         </section>
       </div>
     </section>
-    <div class="footer-note">Esplora panel polls the node directly. No cloud, no extra backend, just the device at your static IP.</div>
+    <div class="footer-note">Panel łączy się bezpośrednio z modułem. Bez chmury, bez dodatkowego backendu, tylko urządzenie pod Twoim stałym IP.</div>
   </main>
 
   <script>
@@ -700,7 +797,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       status: {},
       wifi: {},
       mqtt: {},
-      neighbors: []
+      neighbors: [],
+      sightings: []
     };
 
     const ids = [
@@ -708,7 +806,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       "stat-neighbors", "stat-neighbors-meta", "stat-wifi-rssi", "stat-wifi-meta",
       "stat-last-rx", "stat-last-rx-meta", "stat-uptime", "stat-uptime-meta",
       "dot-radio", "dot-wifi", "dot-mqtt", "pill-radio", "pill-wifi", "pill-mqtt",
-      "scanner", "logs", "chat-text", "radio-summary", "wifi-summary", "mqtt-summary",
+      "scanner", "scanner-summary", "sightings", "sightings-summary", "logs", "chat-text", "radio-summary", "wifi-summary", "mqtt-summary",
       "wifi-ssid", "wifi-pass", "mqtt-host", "mqtt-port", "mqtt-user", "mqtt-pass", "mqtt-topic"
     ];
     const el = Object.fromEntries(ids.map((id) => [id, document.getElementById(id)]));
@@ -767,7 +865,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
     function renderLogs(logs) {
       if (!logs.length && !model.logs.length) {
-        el.logs.innerHTML = '<div class="log-line log">No logs yet. Try ping, beacon, or a chat message.</div>';
+        el.logs.innerHTML = '<div class="log-line log">Brak logów. Spróbuj ping, beacon albo wiadomość LoRa.</div>';
         return;
       }
 
@@ -785,32 +883,104 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     }
 
     function renderNeighbors(neighbors) {
-      if (!neighbors.length) {
-        el.scanner.innerHTML = '<div class="node-card"><div class="node-name">No nearby Esplora nodes</div><p class="mini-note">The node is listening and beaconing. If another module speaks the same profile, it will appear here automatically.</p></div>';
+      const sorted = [...neighbors].sort((a, b) => {
+        const ageDiff = Number(a.ageSec || 999999) - Number(b.ageSec || 999999);
+        if (ageDiff !== 0) return ageDiff;
+        return Number(b.rssi || -999) - Number(a.rssi || -999);
+      });
+
+      if (!sorted.length) {
+        el.scanner.innerHTML = '<div class="empty-state">Brak zdekodowanych węzłów Esplora. Ta tabela pokazuje tylko moduły mówiące tym samym formatem pakietów, na tej samej częstotliwości i z tym samym profilem LoRa.</div>';
         return;
       }
 
-      el.scanner.innerHTML = neighbors.map((node) => {
-        const rssi = Number(node.rssi || -140);
-        const quality = Math.max(0, Math.min(100, Math.round((rssi + 120) * 1.4)));
-        return `
-          <article class="node-card">
-            <div class="node-top">
-              <div>
-                <div class="node-name">${node.name || "Unknown"}</div>
-                <div class="node-id">${node.id || "?"}</div>
-              </div>
-              <div class="pill"><span class="dot live"></span>${node.lastKind || "?"}</div>
-            </div>
-            <div class="signal-bar"><div class="signal-fill" style="width:${quality}%"></div></div>
-            <div class="metric-grid">
-              <div class="metric-row"><span class="metric-key">Distance</span><span class="metric-value">${node.distanceM} m</span></div>
-              <div class="metric-row"><span class="metric-key">RSSI</span><span class="metric-value">${node.rssi} dBm</span></div>
-              <div class="metric-row"><span class="metric-key">SNR</span><span class="metric-value">${node.snr} dB</span></div>
-              <div class="metric-row"><span class="metric-key">Age</span><span class="metric-value">${node.ageSec} s</span></div>
-            </div>
-          </article>`;
-      }).join("");
+      el.scanner.innerHTML = `
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Moduł</th>
+                <th>Ostatni</th>
+                <th>RSSI</th>
+                <th>SNR</th>
+                <th>Dystans</th>
+                <th>Wiek</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${sorted.map((node) => `
+                <tr>
+                  <td>
+                    <div class="row-title">${node.name || "Nieznany"}</div>
+                    <div class="row-sub">${node.id || "?"}</div>
+                  </td>
+                  <td><span class="row-badge node">${node.lastKind || "?"}</span></td>
+                  <td>${node.rssi} dBm</td>
+                  <td>${node.snr} dB</td>
+                  <td>${node.distanceM} m</td>
+                  <td>${fmtSeconds(node.ageSec || 0)}</td>
+                </tr>`).join("")}
+            </tbody>
+          </table>
+        </div>`;
+    }
+
+    function renderSightings(sightings) {
+      const sorted = [...sightings].sort((a, b) => {
+        const ageDiff = Number(a.ageSec || 999999) - Number(b.ageSec || 999999);
+        if (ageDiff !== 0) return ageDiff;
+        return Number(b.hits || 0) - Number(a.hits || 0);
+      });
+
+      if (!sorted.length) {
+        el.sightings.innerHTML = '<div class="empty-state">Na razie nic ogólnego nie wykryto. Użyj <strong>Szybki Sweep</strong>, żeby przeskanować popularne kanały EU868 i wykryć preambuły LoRa, nawet jeśli obce urządzenie nie jest modułem Esplora.</div>';
+        return;
+      }
+
+      el.sightings.innerHTML = `
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Typ</th>
+                <th>Eter</th>
+                <th>Sygnał</th>
+                <th>Trafienia</th>
+                <th>Wiek</th>
+                <th>Opis</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${sorted.map((item) => {
+                const typeCls = (item.type || "").toLowerCase();
+                const rssi = item.rssi === null || item.rssi === undefined ? "--" : `${item.rssi} dBm`;
+                const snr = item.snr === null || item.snr === undefined ? "--" : `${item.snr} dB`;
+                return `
+                  <tr>
+                    <td><span class="row-badge ${typeCls}">${item.type || "?"}</span></td>
+                    <td>
+                      <div class="row-title">${item.frequencyMhz} MHz / SF${item.spreadingFactor}</div>
+                      <div class="row-sub">BW ${item.bandwidthKhz} kHz / CR ${item.codingRate}</div>
+                    </td>
+                    <td>${rssi}<div class="row-sub">${snr}</div></td>
+                    <td>${item.hits || 0}</td>
+                    <td>${fmtSeconds(item.ageSec || 0)}</td>
+                    <td>${item.label || ""}<div class="row-sub">${item.note || ""}</div></td>
+                  </tr>`;
+              }).join("")}
+            </tbody>
+          </table>
+        </div>`;
+    }
+
+    function sweepSummary(status) {
+      if (status.lastSweepAgeSec === null || status.lastSweepAgeSec === undefined) {
+        return "Użyj Szybki Sweep, żeby sprawdzić popularne kanały EU868 i zobaczyć, czy w ogóle coś LoRa nadaje w pobliżu.";
+      }
+      if (Number(status.lastSweepHits || 0) > 0) {
+        return `Ostatni sweep znalazł ${status.lastSweepHits} trafień w ${status.lastSweepChecks} sprawdzeniach, ${fmtSeconds(status.lastSweepAgeSec)} temu.`;
+      }
+      return `Ostatni sweep sprawdził ${status.lastSweepChecks} popularnych presetów EU868 i nie wykrył żadnej preambuły LoRa, ${fmtSeconds(status.lastSweepAgeSec)} temu.`;
     }
 
     function render(data) {
@@ -825,6 +995,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       model.wifi = wifi;
       model.mqtt = mqtt;
       model.neighbors = data.neighbors || [];
+      model.sightings = data.sightings || [];
 
       el["hero-title"].textContent = (status.name || "Esplora") + " / " + (status.id || "--");
       el["badge-id"].textContent = status.id || "--";
@@ -835,26 +1006,32 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       dotState(el["dot-radio"], status.radioReady ? "live" : "off");
       dotState(el["dot-wifi"], wifi.connected ? "live" : "warn");
       dotState(el["dot-mqtt"], mqtt.connected ? "live" : (mqtt.enabled ? "warn" : "off"));
-      el["pill-radio"].textContent = status.radioReady ? `LoRa ready on ${status.pinmap}` : "Radio offline";
-      el["pill-wifi"].textContent = wifi.connected ? `Wi-Fi ${wifi.ip}` : "Wi-Fi idle";
-      el["pill-mqtt"].textContent = mqtt.connected ? `MQTT ${mqtt.host}:${mqtt.port}` : (mqtt.enabled ? "MQTT retrying" : "MQTT disabled");
+      el["pill-radio"].textContent = status.radioReady ? `LoRa gotowe na ${status.pinmap}` : "Radio offline";
+      el["pill-wifi"].textContent = wifi.connected ? `Wi‑Fi ${wifi.ip}` : "Wi‑Fi bez połączenia";
+      el["pill-mqtt"].textContent = mqtt.connected ? `MQTT ${mqtt.host}:${mqtt.port}` : (mqtt.enabled ? "MQTT ponawia połączenie" : "MQTT wyłączone");
 
       el["stat-neighbors"].textContent = String(data.neighborCount || 0);
-      el["stat-neighbors-meta"].textContent = data.neighborCount ? "Live compatible nodes in range" : "No compatible nodes yet";
+      el["stat-neighbors-meta"].textContent = data.neighborCount
+        ? "Kompatybilne moduły na dokładnie tym profilu"
+        : (status.lastSweepHits ? `Brak dekodowania, ale sweep widział ${status.lastSweepHits} trafień` : "Brak kompatybilnych modułów");
       el["stat-wifi-rssi"].textContent = wifi.connected ? `${wifi.rssi} dBm` : "--";
-      el["stat-wifi-meta"].textContent = wifi.connected ? `SSID ${wifi.ssid}` : "Static IP reserved, waiting for STA link";
+      el["stat-wifi-meta"].textContent = wifi.connected ? `SSID ${wifi.ssid}` : "Stałe IP czeka na połączenie STA";
       el["stat-last-rx"].textContent = hasLastRx ? `${lastRx.kind} / ${lastRx.from || "--"}` : "--";
-      el["stat-last-rx-meta"].textContent = hasLastRx ? `${lastRx.rssi} dBm, ${lastRx.snr} dB` : "Nothing decoded yet";
+      el["stat-last-rx-meta"].textContent = hasLastRx ? `${lastRx.rssi} dBm, ${lastRx.snr} dB` : "Nic jeszcze nie zdekodowano";
       el["stat-uptime"].textContent = fmtSeconds(status.uptimeSec || 0);
-      el["stat-uptime-meta"].textContent = status.radioReady ? "Node is active" : "Radio not initialized";
+      el["stat-uptime-meta"].textContent = status.radioReady ? "Moduł pracuje" : "Radio nie jest zainicjalizowane";
 
-      el["radio-summary"].textContent = `Pinmap ${status.pinmap || "--"}, sync 0x${status.syncWord || "--"}, beacon ${status.beaconEnabled ? "on" : "off"}, raw logs ${status.rawLoggingEnabled ? "on" : "off"}.`;
+      el["radio-summary"].textContent = `Pinmap ${status.pinmap || "--"}, sync 0x${status.syncWord || "--"}, beacon ${status.beaconEnabled ? "włączony" : "wyłączony"}, logi RAW ${status.rawLoggingEnabled ? "włączone" : "wyłączone"}.`;
       el["wifi-summary"].textContent = wifi.connected
-        ? `Connected to ${wifi.ssid} with ${wifi.ip} (RSSI ${wifi.rssi} dBm).`
-        : `Static target IP is ${wifi.targetIp || "192.168.1.201"}. Save credentials to bring the panel back after reboot.`;
+        ? `Połączono z ${wifi.ssid}, adres ${wifi.ip}, RSSI ${wifi.rssi} dBm.`
+        : `Docelowy stały adres to ${wifi.targetIp || "192.168.1.201"}. Zapisz dane sieci, aby panel wracał po restarcie.`;
       el["mqtt-summary"].textContent = mqtt.connected
-        ? `Publishing on ${mqtt.baseTopic}. Home Assistant discovery is ${mqtt.haDiscovery ? "enabled" : "disabled"}.`
-        : (mqtt.enabled ? `Broker ${mqtt.host}:${mqtt.port} configured, waiting to connect.` : "MQTT disabled or not configured yet.");
+        ? `Publikacja na ${mqtt.baseTopic}. Discovery dla Home Assistant jest ${mqtt.haDiscovery ? "włączone" : "wyłączone"}.`
+        : (mqtt.enabled ? `Broker ${mqtt.host}:${mqtt.port} ustawiony, czekam na połączenie.` : "MQTT jest wyłączone albo jeszcze nieustawione.");
+      el["scanner-summary"].textContent = data.neighborCount
+        ? `Zdekodowane węzły Esplora na ${status.frequencyMhz} MHz / SF${status.spreadingFactor}, posortowane od najświeższych.`
+        : `Na ${status.frequencyMhz} MHz / SF${status.spreadingFactor} nie ma jeszcze zdekodowanych sąsiadów Esplora.`;
+      el["sightings-summary"].textContent = sweepSummary(status);
 
       syncInputValue(el["wifi-ssid"], wifi.ssid || "");
       syncInputValue(el["mqtt-host"], mqtt.host || "");
@@ -864,12 +1041,13 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
       renderProfiles(status.profile || "");
       renderNeighbors(model.neighbors);
+      renderSightings(model.sightings);
       renderLogs(data.logs || []);
 
-      document.getElementById("beacon-toggle-btn").textContent = status.beaconEnabled ? "Disable Beacon" : "Enable Beacon";
-      document.getElementById("raw-toggle-btn").textContent = status.rawLoggingEnabled ? "Disable Raw Logs" : "Enable Raw Logs";
-      document.getElementById("mqtt-toggle-btn").textContent = mqtt.enabled ? "Disable MQTT" : "Enable MQTT";
-      document.getElementById("mqtt-ha-btn").textContent = mqtt.haDiscovery ? "Disable HA Discovery" : "Enable HA Discovery";
+      document.getElementById("beacon-toggle-btn").textContent = status.beaconEnabled ? "Wyłącz Beacon" : "Włącz Beacon";
+      document.getElementById("raw-toggle-btn").textContent = status.rawLoggingEnabled ? "Wyłącz RAW" : "Włącz RAW";
+      document.getElementById("mqtt-toggle-btn").textContent = mqtt.enabled ? "Wyłącz MQTT" : "Włącz MQTT";
+      document.getElementById("mqtt-ha-btn").textContent = mqtt.haDiscovery ? "Wyłącz Discovery HA" : "Włącz Discovery HA";
     }
 
     async function refresh(force) {
@@ -883,7 +1061,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         const data = await res.json();
         render(data);
       } catch (error) {
-        model.logs.push({ seq: model.lastLogSeq + 1, line: `ERR|panel refresh failed: ${error.message}` });
+        model.logs.push({ seq: model.lastLogSeq + 1, line: `ERR|odswiezanie panelu nieudane: ${error.message}` });
         renderLogs([]);
       }
     }
@@ -899,6 +1077,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     document.getElementById("ping-btn").addEventListener("click", () => sendCommand("ping"));
     document.getElementById("beacon-now-btn").addEventListener("click", () => sendCommand("beacon now"));
     document.getElementById("cad-btn").addEventListener("click", () => sendCommand("cad"));
+    document.getElementById("sweep-btn").addEventListener("click", () => sendCommand("sweep"));
     document.getElementById("beacon-toggle-btn").addEventListener("click", () => sendCommand("beacon toggle"));
     document.getElementById("raw-toggle-btn").addEventListener("click", () => sendCommand("raw toggle"));
     document.getElementById("clear-log-btn").addEventListener("click", () => {
