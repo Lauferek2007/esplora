@@ -1,20 +1,28 @@
 #include <Arduino.h>
 #include <Preferences.h>
+#include <PubSubClient.h>
 #include <SPI.h>
 #include <RadioLib.h>
+#include <WebServer.h>
 #include <WiFi.h>
 
 #include <ctype.h>
 #include <math.h>
+
+#include "web_panel.h"
 
 namespace {
 
 constexpr uint32_t SERIAL_BAUD = 115200;
 constexpr uint32_t SERIAL_WAIT_MS = 2500;
 constexpr uint32_t DEFAULT_BEACON_INTERVAL_MS = 30000;
+constexpr uint32_t MQTT_RECONNECT_INTERVAL_MS = 5000;
+constexpr uint32_t MQTT_STATE_INTERVAL_MS = 10000;
 constexpr size_t MAX_NEIGHBORS = 16;
 constexpr size_t MAX_NAME_LEN = 16;
 constexpr size_t MAX_MSG_LEN = 80;
+constexpr size_t MAX_LOG_ENTRIES = 64;
+constexpr size_t MAX_LOG_LINE_LEN = 192;
 constexpr uint8_t PROTOCOL_VERSION = 1;
 
 struct PinMap {
@@ -79,6 +87,23 @@ struct WifiConfig {
   IPAddress dns2 = IPAddress(8, 8, 8, 8);
 };
 
+struct MqttConfig {
+  bool enabled = false;
+  bool haDiscoveryEnabled = true;
+  char host[65] = {0};
+  uint16_t port = 1883;
+  char user[33] = {0};
+  char password[65] = {0};
+  char baseTopic[80] = {0};
+};
+
+struct LogEntry {
+  bool used = false;
+  uint32_t seq = 0;
+  uint32_t tsMs = 0;
+  char line[MAX_LOG_LINE_LEN + 1] = {0};
+};
+
 const PinMap PINMAPS[] = {
   {
     "b2b",
@@ -117,24 +142,53 @@ const ProbeConfig PROBES[] = {
 RadioConfig gConfig;
 Neighbor gNeighbors[MAX_NEIGHBORS];
 WifiConfig gWifiConfig;
+MqttConfig gMqttConfig;
+LogEntry gLogEntries[MAX_LOG_ENTRIES];
 Preferences gPrefs;
 
 Module* gModule = nullptr;
 SX1262* gRadio = nullptr;
 const PinMap* gActivePinMap = nullptr;
 String gSerialLine;
+WebServer gWebServer(80);
+WiFiClient gMqttSocket;
+PubSubClient gMqttClient(gMqttSocket);
 
 volatile bool gReceivedFlag = false;
 bool gRadioReady = false;
+bool gWebServerStarted = false;
+bool gMqttDiscoveryPublished = false;
+bool gMqttStateDirty = true;
+bool gMqttNeighborsDirty = true;
 uint32_t gLastBeaconAt = 0;
 uint32_t gNextSequence = 1;
+uint32_t gLastLogSequence = 0;
+uint32_t gLastMqttReconnectAt = 0;
+uint32_t gLastMqttStateAt = 0;
+uint32_t gLastRxAt = 0;
 
 uint32_t gNodeId = 0;
 char gNodeIdText[9] = {0};
 char gNodeName[MAX_NAME_LEN + 1] = {0};
+char gLastRxFrom[9] = {0};
+char gLastRxText[MAX_MSG_LEN + 1] = {0};
+char gLastRxKind = '-';
+float gLastRxRssi = 0.0f;
+float gLastRxSnr = 0.0f;
+long gLastRxFreqErrHz = 0;
 
 bool timeReached(uint32_t since, uint32_t waitMs) {
   return static_cast<uint32_t>(millis() - since) >= waitMs;
+}
+
+size_t countNeighbors() {
+  size_t count = 0;
+  for (const Neighbor& neighbor : gNeighbors) {
+    if (neighbor.used) {
+      ++count;
+    }
+  }
+  return count;
 }
 
 String previewText(const String& text, size_t maxLen = 48) {
@@ -162,6 +216,50 @@ void copyString(char* dst, size_t dstLen, const String& src) {
 String ipToString(const IPAddress& ip) {
   return ip.toString();
 }
+
+String jsonEscape(const String& raw) {
+  String out;
+  out.reserve(raw.length() + 8);
+  for (size_t i = 0; i < raw.length(); ++i) {
+    const char ch = raw.charAt(i);
+    switch (ch) {
+      case '\\': out += "\\\\"; break;
+      case '"': out += "\\\""; break;
+      case '\b': out += "\\b"; break;
+      case '\f': out += "\\f"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:
+        if (static_cast<uint8_t>(ch) < 0x20) {
+          out += ' ';
+        } else {
+          out += ch;
+        }
+        break;
+    }
+  }
+  return out;
+}
+
+void appendJsonQuoted(String& out, const String& value) {
+  out += '"';
+  out += jsonEscape(value);
+  out += '"';
+}
+
+void markMqttStateDirty(bool neighborsToo = false) {
+  gMqttStateDirty = true;
+  if (neighborsToo) {
+    gMqttNeighborsDirty = true;
+  }
+}
+
+String mqttAvailabilityTopic();
+void mqttPublishEventLine(const String& line);
+void mqttEnsureConnected();
+void mqttLoop();
+void ensureWebServerState();
 
 String sanitizeName(const String& raw) {
   String out;
@@ -280,8 +378,19 @@ float estimateDistanceMeters(float rssi, int8_t txPower) {
   return distance;
 }
 
+void rememberLogLine(const String& line) {
+  const uint32_t seq = ++gLastLogSequence;
+  LogEntry& entry = gLogEntries[seq % MAX_LOG_ENTRIES];
+  entry.used = true;
+  entry.seq = seq;
+  entry.tsMs = millis();
+  copyString(entry.line, sizeof(entry.line), line);
+}
+
 void emitLine(const String& line) {
+  rememberLogLine(line);
   Serial.println(line);
+  mqttPublishEventLine(line);
 }
 
 void emitLog(const String& message) {
@@ -316,6 +425,29 @@ void saveWifiPrefs() {
   gPrefs.putString("wifi_pass", gWifiConfig.password);
 }
 
+void loadMqttPrefs() {
+  gMqttConfig.enabled = gPrefs.getBool("mqtt_en", false);
+  gMqttConfig.haDiscoveryEnabled = gPrefs.getBool("mqtt_ha", true);
+  copyString(gMqttConfig.host, sizeof(gMqttConfig.host), gPrefs.getString("mqtt_host", ""));
+  gMqttConfig.port = static_cast<uint16_t>(gPrefs.getUInt("mqtt_port", 1883));
+  copyString(gMqttConfig.user, sizeof(gMqttConfig.user), gPrefs.getString("mqtt_user", ""));
+  copyString(gMqttConfig.password, sizeof(gMqttConfig.password), gPrefs.getString("mqtt_pass", ""));
+  copyString(gMqttConfig.baseTopic, sizeof(gMqttConfig.baseTopic), gPrefs.getString("mqtt_topic", ""));
+  if (strlen(gMqttConfig.baseTopic) == 0) {
+    copyString(gMqttConfig.baseTopic, sizeof(gMqttConfig.baseTopic), "esplora/" + String(gNodeIdText));
+  }
+}
+
+void saveMqttPrefs() {
+  gPrefs.putBool("mqtt_en", gMqttConfig.enabled);
+  gPrefs.putBool("mqtt_ha", gMqttConfig.haDiscoveryEnabled);
+  gPrefs.putString("mqtt_host", gMqttConfig.host);
+  gPrefs.putUInt("mqtt_port", gMqttConfig.port);
+  gPrefs.putString("mqtt_user", gMqttConfig.user);
+  gPrefs.putString("mqtt_pass", gMqttConfig.password);
+  gPrefs.putString("mqtt_topic", gMqttConfig.baseTopic);
+}
+
 void printWifiStatus() {
   String line = "WIFI|SSID=" + String(gWifiConfig.ssid);
   line += "|CONNECTED=" + String(WiFi.status() == WL_CONNECTED ? 1 : 0);
@@ -324,6 +456,16 @@ void printWifiStatus() {
     line += "|IP=" + ipToString(WiFi.localIP());
     line += "|RSSI=" + String(WiFi.RSSI());
   }
+  emitLine(line);
+}
+
+void printMqttStatus() {
+  String line = "MQTT|ENABLED=" + String(gMqttConfig.enabled ? 1 : 0);
+  line += "|CONNECTED=" + String(gMqttClient.connected() ? 1 : 0);
+  line += "|HOST=" + String(gMqttConfig.host);
+  line += "|PORT=" + String(gMqttConfig.port);
+  line += "|TOPIC=" + String(gMqttConfig.baseTopic);
+  line += "|HA=" + String(gMqttConfig.haDiscoveryEnabled ? 1 : 0);
   emitLine(line);
 }
 
@@ -348,6 +490,7 @@ bool connectWifi(bool announce) {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
+    markMqttStateDirty();
     if (announce) {
       emitEvent(
         "WIFI",
@@ -363,8 +506,14 @@ bool connectWifi(bool announce) {
 }
 
 void disconnectWifi() {
+  if (gMqttClient.connected()) {
+    gMqttClient.publish(mqttAvailabilityTopic().c_str(), "offline", true);
+    gMqttClient.disconnect();
+  }
+  gMqttDiscoveryPublished = false;
   WiFi.disconnect(true, true);
   WiFi.mode(WIFI_OFF);
+  markMqttStateDirty();
   emitEvent("WIFI", "STATE=OFF|TARGET_IP=" + ipToString(gWifiConfig.localIp));
 }
 
@@ -427,6 +576,435 @@ void printNeighbors() {
   }
   if (!any) {
     emitLine("NODE|EMPTY=1");
+  }
+}
+
+String buildStatusJson() {
+  String out;
+  out.reserve(960);
+  out += '{';
+  out += "\"status\":{";
+  out += "\"id\":";
+  appendJsonQuoted(out, String(gNodeIdText));
+  out += ",\"name\":";
+  appendJsonQuoted(out, String(gNodeName));
+  out += ",\"radioReady\":";
+  out += gRadioReady ? "true" : "false";
+  out += ",\"pinmap\":";
+  appendJsonQuoted(out, gActivePinMap == nullptr ? "none" : String(gActivePinMap->key));
+  out += ",\"frequencyMhz\":";
+  out += String(gConfig.frequencyMhz, 3);
+  out += ",\"bandwidthKhz\":";
+  out += String(gConfig.bandwidthKhz, 1);
+  out += ",\"spreadingFactor\":";
+  out += String(gConfig.spreadingFactor);
+  out += ",\"codingRate\":";
+  out += String(gConfig.codingRate);
+  out += ",\"txPower\":";
+  out += String(gConfig.txPower);
+  out += ",\"syncWord\":";
+  appendJsonQuoted(out, String(gConfig.syncWord, HEX));
+  out += ",\"beaconEnabled\":";
+  out += gConfig.beaconEnabled ? "true" : "false";
+  out += ",\"rawLoggingEnabled\":";
+  out += gConfig.rawLoggingEnabled ? "true" : "false";
+  out += ",\"beaconIntervalSec\":";
+  out += String(gConfig.beaconIntervalMs / 1000U);
+  out += ",\"profile\":";
+  appendJsonQuoted(out, String(gConfig.profile));
+  out += ",\"uptimeSec\":";
+  out += String(millis() / 1000U);
+  out += '}';
+
+  out += ",\"wifi\":{";
+  out += "\"ssid\":";
+  appendJsonQuoted(out, String(gWifiConfig.ssid));
+  out += ",\"connected\":";
+  out += WiFi.status() == WL_CONNECTED ? "true" : "false";
+  out += ",\"targetIp\":";
+  appendJsonQuoted(out, ipToString(gWifiConfig.localIp));
+  out += ",\"ip\":";
+  appendJsonQuoted(out, WiFi.status() == WL_CONNECTED ? ipToString(WiFi.localIP()) : "");
+  out += ",\"rssi\":";
+  out += WiFi.status() == WL_CONNECTED ? String(WiFi.RSSI()) : "null";
+  out += '}';
+
+  out += ",\"mqtt\":{";
+  out += "\"enabled\":";
+  out += gMqttConfig.enabled ? "true" : "false";
+  out += ",\"connected\":";
+  out += gMqttClient.connected() ? "true" : "false";
+  out += ",\"host\":";
+  appendJsonQuoted(out, String(gMqttConfig.host));
+  out += ",\"port\":";
+  out += String(gMqttConfig.port);
+  out += ",\"user\":";
+  appendJsonQuoted(out, String(gMqttConfig.user));
+  out += ",\"baseTopic\":";
+  appendJsonQuoted(out, String(gMqttConfig.baseTopic));
+  out += ",\"haDiscovery\":";
+  out += gMqttConfig.haDiscoveryEnabled ? "true" : "false";
+  out += '}';
+
+  out += ",\"lastRx\":{";
+  out += "\"kind\":";
+  appendJsonQuoted(out, String(gLastRxKind));
+  out += ",\"from\":";
+  appendJsonQuoted(out, String(gLastRxFrom));
+  out += ",\"text\":";
+  appendJsonQuoted(out, String(gLastRxText));
+  out += ",\"rssi\":";
+  out += gLastRxAt > 0 ? String(gLastRxRssi, 1) : "null";
+  out += ",\"snr\":";
+  out += gLastRxAt > 0 ? String(gLastRxSnr, 1) : "null";
+  out += ",\"freqErrHz\":";
+  out += gLastRxAt > 0 ? String(gLastRxFreqErrHz) : "null";
+  out += ",\"ageSec\":";
+  out += gLastRxAt > 0 ? String((millis() - gLastRxAt) / 1000U) : "null";
+  out += '}';
+
+  out += ",\"neighborCount\":";
+  out += String(countNeighbors());
+  out += '}';
+  return out;
+}
+
+String buildNeighborsJson() {
+  String out;
+  out.reserve(1600);
+  out += '[';
+  bool first = true;
+  for (const Neighbor& neighbor : gNeighbors) {
+    if (!neighbor.used) {
+      continue;
+    }
+    if (!first) {
+      out += ',';
+    }
+    first = false;
+    out += '{';
+    out += "\"id\":";
+    appendJsonQuoted(out, String(neighbor.id));
+    out += ",\"name\":";
+    appendJsonQuoted(out, String(neighbor.name));
+    out += ",\"ageSec\":";
+    out += String((millis() - neighbor.lastSeenMs) / 1000U);
+    out += ",\"rssi\":";
+    out += String(neighbor.rssi, 1);
+    out += ",\"snr\":";
+    out += String(neighbor.snr, 1);
+    out += ",\"distanceM\":";
+    out += String(neighbor.distanceM, 1);
+    out += ",\"txPower\":";
+    out += String(neighbor.txPower);
+    out += ",\"lastSeq\":";
+    out += String(neighbor.lastSeq);
+    out += ",\"rxCount\":";
+    out += String(neighbor.rxCount);
+    out += ",\"uptimeSec\":";
+    out += String(neighbor.uptimeSec);
+    out += ",\"lastKind\":";
+    appendJsonQuoted(out, String(neighbor.lastKind));
+    out += '}';
+  }
+  out += ']';
+  return out;
+}
+
+String buildLogsJson(uint32_t since) {
+  String out;
+  out.reserve(4200);
+  out += '[';
+  bool first = true;
+  const uint32_t earliest = (gLastLogSequence > MAX_LOG_ENTRIES) ? (gLastLogSequence - MAX_LOG_ENTRIES + 1) : 1;
+  const uint32_t start = since + 1 > earliest ? since + 1 : earliest;
+  for (uint32_t seq = start; seq <= gLastLogSequence; ++seq) {
+    const LogEntry& entry = gLogEntries[seq % MAX_LOG_ENTRIES];
+    if (!entry.used || entry.seq != seq) {
+      continue;
+    }
+    if (!first) {
+      out += ',';
+    }
+    first = false;
+    out += '{';
+    out += "\"seq\":";
+    out += String(entry.seq);
+    out += ",\"tsMs\":";
+    out += String(entry.tsMs);
+    out += ",\"line\":";
+    appendJsonQuoted(out, String(entry.line));
+    out += '}';
+  }
+  out += ']';
+  return out;
+}
+
+String buildApiStateJson(uint32_t since) {
+  String out;
+  String statusJson = buildStatusJson();
+  String neighborsJson = buildNeighborsJson();
+  String logsJson = buildLogsJson(since);
+  out.reserve(statusJson.length() + neighborsJson.length() + logsJson.length() + 128);
+  out += '{';
+  out += "\"nowMs\":";
+  out += String(millis());
+  out += ",\"neighborCount\":";
+  out += String(countNeighbors());
+  out += ",\"lastLogSeq\":";
+  out += String(gLastLogSequence);
+  out += ",\"payload\":";
+  out += statusJson;
+  out += ",\"neighbors\":";
+  out += neighborsJson;
+  out += ",\"logs\":";
+  out += logsJson;
+  out += '}';
+  return out;
+}
+
+String mqttAvailabilityTopic() {
+  return String(gMqttConfig.baseTopic) + "/availability";
+}
+
+String mqttStatusTopic() {
+  return String(gMqttConfig.baseTopic) + "/status";
+}
+
+String mqttNeighborsTopic() {
+  return String(gMqttConfig.baseTopic) + "/neighbors";
+}
+
+String mqttEventsTopic() {
+  return String(gMqttConfig.baseTopic) + "/events";
+}
+
+void mqttPublishRetained(const String& topic, const String& payload) {
+  if (!gMqttClient.connected()) {
+    return;
+  }
+  gMqttClient.publish(topic.c_str(), payload.c_str(), true);
+}
+
+void mqttPublishTransient(const String& topic, const String& payload) {
+  if (!gMqttClient.connected()) {
+    return;
+  }
+  gMqttClient.publish(topic.c_str(), payload.c_str(), false);
+}
+
+String mqttDeviceJson() {
+  String out;
+  out.reserve(220);
+  out += '{';
+  out += "\"ids\":[";
+  appendJsonQuoted(out, "esplora_" + String(gNodeIdText));
+  out += "],\"name\":";
+  appendJsonQuoted(out, String("Esplora ") + gNodeIdText);
+  out += ",\"mdl\":";
+  appendJsonQuoted(out, "XIAO ESP32S3 + Wio-SX1262");
+  out += ",\"mf\":";
+  appendJsonQuoted(out, "Seeed Studio");
+  out += ",\"sw\":";
+  appendJsonQuoted(out, "esplora");
+  out += '}';
+  return out;
+}
+
+void mqttPublishDiscovery() {
+  if (!gMqttClient.connected() || !gMqttConfig.haDiscoveryEnabled || gMqttDiscoveryPublished) {
+    return;
+  }
+
+  const String dev = mqttDeviceJson();
+  const String avail = mqttAvailabilityTopic();
+  const String statusTopic = mqttStatusTopic();
+  const String prefix = "homeassistant";
+  const String nodeKey = String("esplora_") + gNodeIdText;
+
+  auto publishConfig = [&](const String& component, const String& objectId, const String& payload) {
+    const String topic = prefix + "/" + component + "/" + nodeKey + "/" + objectId + "/config";
+    gMqttClient.publish(topic.c_str(), payload.c_str(), true);
+  };
+
+  publishConfig(
+    "sensor",
+    "neighbor_count",
+    "{\"name\":\"Esplora Neighbor Count\",\"uniq_id\":\"" + nodeKey + "_neighbor_count\",\"stat_t\":\"" + statusTopic +
+      "\",\"val_tpl\":\"{{ value_json.neighborCount }}\",\"avty_t\":\"" + avail +
+      "\",\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\",\"dev\":" + dev + "}"
+  );
+  publishConfig(
+    "sensor",
+    "wifi_rssi",
+    "{\"name\":\"Esplora WiFi RSSI\",\"uniq_id\":\"" + nodeKey + "_wifi_rssi\",\"stat_t\":\"" + statusTopic +
+      "\",\"unit_of_meas\":\"dBm\",\"val_tpl\":\"{{ value_json.wifi.rssi }}\",\"avty_t\":\"" + avail +
+      "\",\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\",\"dev\":" + dev + "}"
+  );
+  publishConfig(
+    "sensor",
+    "last_rx_rssi",
+    "{\"name\":\"Esplora Last RX RSSI\",\"uniq_id\":\"" + nodeKey + "_last_rx_rssi\",\"stat_t\":\"" + statusTopic +
+      "\",\"unit_of_meas\":\"dBm\",\"val_tpl\":\"{{ value_json.lastRx.rssi }}\",\"avty_t\":\"" + avail +
+      "\",\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\",\"dev\":" + dev + "}"
+  );
+  publishConfig(
+    "sensor",
+    "last_rx_snr",
+    "{\"name\":\"Esplora Last RX SNR\",\"uniq_id\":\"" + nodeKey + "_last_rx_snr\",\"stat_t\":\"" + statusTopic +
+      "\",\"unit_of_meas\":\"dB\",\"val_tpl\":\"{{ value_json.lastRx.snr }}\",\"avty_t\":\"" + avail +
+      "\",\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\",\"dev\":" + dev + "}"
+  );
+  publishConfig(
+    "binary_sensor",
+    "wifi_connected",
+    "{\"name\":\"Esplora WiFi Connected\",\"uniq_id\":\"" + nodeKey + "_wifi_connected\",\"stat_t\":\"" + statusTopic +
+      "\",\"val_tpl\":\"{{ 'ON' if value_json.wifi.connected else 'OFF' }}\",\"pl_on\":\"ON\",\"pl_off\":\"OFF\",\"avty_t\":\"" + avail +
+      "\",\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\",\"dev\":" + dev + "}"
+  );
+  publishConfig(
+    "switch",
+    "beacon_enabled",
+    "{\"name\":\"Esplora Beacon\",\"uniq_id\":\"" + nodeKey + "_beacon\",\"stat_t\":\"" + statusTopic +
+      "\",\"cmd_t\":\"" + String(gMqttConfig.baseTopic) + "/ha/beacon_enabled/set\",\"val_tpl\":\"{{ 'ON' if value_json.status.beaconEnabled else 'OFF' }}\",\"pl_on\":\"ON\",\"pl_off\":\"OFF\",\"state_on\":\"ON\",\"state_off\":\"OFF\",\"avty_t\":\"" + avail +
+      "\",\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\",\"dev\":" + dev + "}"
+  );
+  publishConfig(
+    "button",
+    "ping",
+    "{\"name\":\"Esplora Ping\",\"uniq_id\":\"" + nodeKey + "_ping\",\"cmd_t\":\"" + String(gMqttConfig.baseTopic) +
+      "/ha/ping/command\",\"pl_prs\":\"PRESS\",\"dev\":" + dev + "}"
+  );
+  publishConfig(
+    "button",
+    "beacon_now",
+    "{\"name\":\"Esplora Beacon Now\",\"uniq_id\":\"" + nodeKey + "_beacon_now\",\"cmd_t\":\"" + String(gMqttConfig.baseTopic) +
+      "/ha/beacon_now/command\",\"pl_prs\":\"PRESS\",\"dev\":" + dev + "}"
+  );
+
+  gMqttDiscoveryPublished = true;
+}
+
+void mqttPublishStateSnapshot(bool force) {
+  if (!gMqttClient.connected()) {
+    return;
+  }
+
+  if (!force && !gMqttStateDirty && !gMqttNeighborsDirty && !timeReached(gLastMqttStateAt, MQTT_STATE_INTERVAL_MS)) {
+    return;
+  }
+
+  mqttPublishRetained(mqttStatusTopic(), buildStatusJson());
+  if (force || gMqttNeighborsDirty) {
+    mqttPublishRetained(mqttNeighborsTopic(), buildNeighborsJson());
+  }
+  gLastMqttStateAt = millis();
+  gMqttStateDirty = false;
+  gMqttNeighborsDirty = false;
+}
+
+void mqttPublishEventLine(const String& line) {
+  if (!gMqttClient.connected()) {
+    return;
+  }
+  String payload;
+  payload.reserve(line.length() + 48);
+  payload += "{\"seq\":";
+  payload += String(gLastLogSequence);
+  payload += ",\"line\":";
+  appendJsonQuoted(payload, line);
+  payload += '}';
+  mqttPublishTransient(mqttEventsTopic(), payload);
+}
+
+void mqttHandlePayload(const String& topic, const String& payload);
+
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  String t = String(topic);
+  String body;
+  body.reserve(length);
+  for (unsigned int i = 0; i < length; ++i) {
+    body += static_cast<char>(payload[i]);
+  }
+  mqttHandlePayload(t, body);
+}
+
+void mqttConnectNow() {
+  if (!gMqttConfig.enabled) {
+    emitWarn("mqtt is disabled");
+    return;
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    emitWarn("wifi is not connected");
+    return;
+  }
+  if (strlen(gMqttConfig.host) == 0) {
+    emitWarn("mqtt host is empty");
+    return;
+  }
+
+  gMqttClient.setServer(gMqttConfig.host, gMqttConfig.port);
+  gMqttDiscoveryPublished = false;
+  const String willTopic = mqttAvailabilityTopic();
+  const String clientId = "esplora-" + String(gNodeIdText);
+  bool ok = false;
+  if (strlen(gMqttConfig.user) > 0) {
+    ok = gMqttClient.connect(
+      clientId.c_str(),
+      gMqttConfig.user,
+      gMqttConfig.password,
+      willTopic.c_str(),
+      0,
+      true,
+      "offline"
+    );
+  } else {
+    ok = gMqttClient.connect(
+      clientId.c_str(),
+      willTopic.c_str(),
+      0,
+      true,
+      "offline"
+    );
+  }
+
+  if (!ok) {
+    emitWarn("mqtt connect failed, state=" + String(gMqttClient.state()));
+    return;
+  }
+
+  gMqttClient.publish(willTopic.c_str(), "online", true);
+  gMqttClient.subscribe((String(gMqttConfig.baseTopic) + "/cmd").c_str());
+  gMqttClient.subscribe((String(gMqttConfig.baseTopic) + "/send").c_str());
+  gMqttClient.subscribe((String(gMqttConfig.baseTopic) + "/ha/ping/command").c_str());
+  gMqttClient.subscribe((String(gMqttConfig.baseTopic) + "/ha/beacon_now/command").c_str());
+  gMqttClient.subscribe((String(gMqttConfig.baseTopic) + "/ha/beacon_enabled/set").c_str());
+  emitEvent("MQTT", "STATE=CONNECTED|HOST=" + String(gMqttConfig.host) + "|PORT=" + String(gMqttConfig.port));
+  mqttPublishDiscovery();
+  mqttPublishStateSnapshot(true);
+}
+
+void mqttEnsureConnected() {
+  if (!gMqttConfig.enabled || WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+  if (gMqttClient.connected()) {
+    return;
+  }
+  if (!timeReached(gLastMqttReconnectAt, MQTT_RECONNECT_INTERVAL_MS)) {
+    return;
+  }
+  gLastMqttReconnectAt = millis();
+  mqttConnectNow();
+}
+
+void mqttLoop() {
+  if (gMqttClient.connected()) {
+    gMqttClient.loop();
+    mqttPublishDiscovery();
+    mqttPublishStateSnapshot(false);
+  } else {
+    mqttEnsureConnected();
   }
 }
 
@@ -537,6 +1115,7 @@ bool configureRadioForPinMap(const PinMap& pinMap) {
     gActivePinMap = &pinMap;
     gRadioReady = true;
     gLastBeaconAt = millis();
+    markMqttStateDirty(true);
     emitEvent(
       "RADIO",
       "READY=1|PINMAP=" + String(pinMap.key) +
@@ -620,6 +1199,7 @@ bool transmitFrame(const String& frame, const char* label) {
     "|AIRTIME_US=" + String(static_cast<uint32_t>(airtime)) +
     "|SEQ=" + String(gNextSequence - 1)
   );
+  markMqttStateDirty();
   restartReceive();
   return true;
 }
@@ -683,6 +1263,7 @@ void updateNeighbor(
   neighbor->distanceM = estimateDistanceMeters(rssi, txPower);
   neighbor->uptimeSec = uptimeSec;
   neighbor->lastKind = kind;
+  markMqttStateDirty(true);
 }
 
 void logKnownPacket(
@@ -719,6 +1300,17 @@ void logKnownPacket(
   emitEvent("RX", details);
 }
 
+void updateLastRx(char kind, const String& from, const String& text, float rssi, float snr, long freqErrHz) {
+  gLastRxAt = millis();
+  gLastRxKind = kind;
+  copyString(gLastRxFrom, sizeof(gLastRxFrom), from);
+  copyString(gLastRxText, sizeof(gLastRxText), text);
+  gLastRxRssi = rssi;
+  gLastRxSnr = snr;
+  gLastRxFreqErrHz = freqErrHz;
+  markMqttStateDirty();
+}
+
 void handleKnownFrame(const String& packet, float rssi, float snr, long freqErrHz) {
   size_t fields = splitCount(packet);
   if (fields < 6) {
@@ -746,6 +1338,7 @@ void handleKnownFrame(const String& packet, float rssi, float snr, long freqErrH
   if (kind == 'B' && fields >= 8) {
     uptimeSec = static_cast<uint32_t>(splitField(packet, 6).toInt());
     updateNeighbor(nodeId, name, seq, kind, txPower, rssi, snr, freqErrHz, uptimeSec);
+    updateLastRx(kind, nodeId, "beacon", rssi, snr, freqErrHz);
     Neighbor* neighbor = findNeighbor(nodeId);
     if (neighbor != nullptr) {
       logKnownPacket(
@@ -770,6 +1363,7 @@ void handleKnownFrame(const String& packet, float rssi, float snr, long freqErrH
       emitWarn("message hex decode failed");
       return;
     }
+    updateLastRx(kind, nodeId, text, rssi, snr, freqErrHz);
     Neighbor* neighbor = findNeighbor(nodeId);
     String extra = "TXTHEX=" + splitField(packet, 6);
     extra += "|TEXT=" + previewText(text);
@@ -783,6 +1377,7 @@ void handleKnownFrame(const String& packet, float rssi, float snr, long freqErrH
   if ((kind == 'P' || kind == 'O') && fields >= 7) {
     updateNeighbor(nodeId, name, seq, kind, txPower, rssi, snr, freqErrHz, 0);
     String nonce = splitField(packet, 6);
+    updateLastRx(kind, nodeId, nonce, rssi, snr, freqErrHz);
     Neighbor* neighbor = findNeighbor(nodeId);
     String extra = "NONCE=" + nonce;
     if (neighbor != nullptr) {
@@ -800,6 +1395,7 @@ void handleKnownFrame(const String& packet, float rssi, float snr, long freqErrH
 }
 
 void handleUnknownFrame(const String& packet, float rssi, float snr, long freqErrHz) {
+  updateLastRx('R', "RAW", previewText(packet), rssi, snr, freqErrHz);
   if (!gConfig.rawLoggingEnabled) {
     return;
   }
@@ -937,6 +1533,15 @@ void printHelp() {
   emitLine("HELP|wifi pass <haslo>");
   emitLine("HELP|wifi connect");
   emitLine("HELP|wifi off");
+  emitLine("HELP|mqtt status");
+  emitLine("HELP|mqtt host <host>");
+  emitLine("HELP|mqtt port <port>");
+  emitLine("HELP|mqtt user <user>");
+  emitLine("HELP|mqtt pass <haslo>");
+  emitLine("HELP|mqtt topic <base/topic>");
+  emitLine("HELP|mqtt on|off|toggle");
+  emitLine("HELP|mqtt connect");
+  emitLine("HELP|mqtt ha on|off|toggle");
   emitLine("HELP|cad");
   emitLine("HELP|restart radio");
 }
@@ -961,6 +1566,11 @@ void handleCommand(const String& input) {
 
   if (line.equalsIgnoreCase("status")) {
     printStatus();
+    return;
+  }
+
+  if (line.equalsIgnoreCase("mqtt status")) {
+    printMqttStatus();
     return;
   }
 
@@ -990,6 +1600,11 @@ void handleCommand(const String& input) {
     return;
   }
 
+  if (line.equalsIgnoreCase("mqtt connect")) {
+    mqttConnectNow();
+    return;
+  }
+
   if (line.equalsIgnoreCase("wifi off")) {
     disconnectWifi();
     return;
@@ -1013,15 +1628,127 @@ void handleCommand(const String& input) {
     return;
   }
 
+  if (line.startsWith("mqtt host ")) {
+    String host = line.substring(10);
+    host.trim();
+    copyString(gMqttConfig.host, sizeof(gMqttConfig.host), host);
+    saveMqttPrefs();
+    markMqttStateDirty();
+    emitOk("mqtt host saved");
+    return;
+  }
+
+  if (line.startsWith("mqtt port ")) {
+    int port = line.substring(10).toInt();
+    if (port < 1 || port > 65535) {
+      emitError("mqtt port out of range");
+      return;
+    }
+    gMqttConfig.port = static_cast<uint16_t>(port);
+    saveMqttPrefs();
+    markMqttStateDirty();
+    emitOk("mqtt port saved");
+    return;
+  }
+
+  if (line.startsWith("mqtt user ")) {
+    String user = line.substring(10);
+    user.trim();
+    copyString(gMqttConfig.user, sizeof(gMqttConfig.user), user);
+    saveMqttPrefs();
+    markMqttStateDirty();
+    emitOk("mqtt user saved");
+    return;
+  }
+
+  if (line.startsWith("mqtt pass ")) {
+    String password = line.substring(10);
+    password.trim();
+    copyString(gMqttConfig.password, sizeof(gMqttConfig.password), password);
+    saveMqttPrefs();
+    markMqttStateDirty();
+    emitOk("mqtt password saved");
+    return;
+  }
+
+  if (line.startsWith("mqtt topic ")) {
+    String topic = line.substring(11);
+    topic.trim();
+    if (topic.isEmpty()) {
+      emitError("mqtt topic cannot be empty");
+      return;
+    }
+    copyString(gMqttConfig.baseTopic, sizeof(gMqttConfig.baseTopic), topic);
+    saveMqttPrefs();
+    markMqttStateDirty(true);
+    emitOk("mqtt topic saved");
+    return;
+  }
+
+  if (line.equalsIgnoreCase("mqtt on")) {
+    gMqttConfig.enabled = true;
+    saveMqttPrefs();
+    markMqttStateDirty();
+    emitOk("mqtt enabled");
+    return;
+  }
+
+  if (line.equalsIgnoreCase("mqtt off")) {
+    gMqttConfig.enabled = false;
+    saveMqttPrefs();
+    if (gMqttClient.connected()) {
+      gMqttClient.publish(mqttAvailabilityTopic().c_str(), "offline", true);
+      gMqttClient.disconnect();
+    }
+    gMqttDiscoveryPublished = false;
+    markMqttStateDirty();
+    emitOk("mqtt disabled");
+    return;
+  }
+
+  if (line.equalsIgnoreCase("mqtt toggle")) {
+    handleCommand(gMqttConfig.enabled ? "mqtt off" : "mqtt on");
+    return;
+  }
+
+  if (line.equalsIgnoreCase("mqtt ha on")) {
+    gMqttConfig.haDiscoveryEnabled = true;
+    gMqttDiscoveryPublished = false;
+    saveMqttPrefs();
+    markMqttStateDirty();
+    emitOk("mqtt ha discovery enabled");
+    return;
+  }
+
+  if (line.equalsIgnoreCase("mqtt ha off")) {
+    gMqttConfig.haDiscoveryEnabled = false;
+    saveMqttPrefs();
+    markMqttStateDirty();
+    emitOk("mqtt ha discovery disabled");
+    return;
+  }
+
+  if (line.equalsIgnoreCase("mqtt ha toggle")) {
+    handleCommand(gMqttConfig.haDiscoveryEnabled ? "mqtt ha off" : "mqtt ha on");
+    return;
+  }
+
   if (line.equalsIgnoreCase("beacon on")) {
     gConfig.beaconEnabled = true;
+    markMqttStateDirty();
     emitOk("beacon enabled");
     return;
   }
 
   if (line.equalsIgnoreCase("beacon off")) {
     gConfig.beaconEnabled = false;
+    markMqttStateDirty();
     emitOk("beacon disabled");
+    return;
+  }
+
+  if (line.equalsIgnoreCase("beacon toggle")) {
+    handleCommand(gConfig.beaconEnabled ? "beacon off" : "beacon on");
     return;
   }
 
@@ -1040,6 +1767,7 @@ void handleCommand(const String& input) {
     }
     gConfig.beaconEnabled = true;
     gConfig.beaconIntervalMs = seconds * 1000UL;
+    markMqttStateDirty();
     emitOk("beacon interval set to " + String(seconds) + " s");
     return;
   }
@@ -1061,19 +1789,27 @@ void handleCommand(const String& input) {
   if (line.startsWith("set name ")) {
     String name = sanitizeName(line.substring(9));
     copyString(gNodeName, sizeof(gNodeName), name);
+    markMqttStateDirty();
     emitOk("name=" + String(gNodeName));
     return;
   }
 
   if (line.equalsIgnoreCase("raw on")) {
     gConfig.rawLoggingEnabled = true;
+    markMqttStateDirty();
     emitOk("raw logging enabled");
     return;
   }
 
   if (line.equalsIgnoreCase("raw off")) {
     gConfig.rawLoggingEnabled = false;
+    markMqttStateDirty();
     emitOk("raw logging disabled");
+    return;
+  }
+
+  if (line.equalsIgnoreCase("raw toggle")) {
+    handleCommand(gConfig.rawLoggingEnabled ? "raw off" : "raw on");
     return;
   }
 
@@ -1155,6 +1891,147 @@ void handleCommand(const String& input) {
   emitError("unknown command, use help");
 }
 
+void mqttHandlePayload(const String& topic, const String& payload) {
+  if (topic.endsWith("/cmd")) {
+    handleCommand(payload);
+    return;
+  }
+  if (topic.endsWith("/send")) {
+    sendMessage(payload);
+    return;
+  }
+  if (topic.endsWith("/ha/ping/command")) {
+    sendPing(String(millis()));
+    return;
+  }
+  if (topic.endsWith("/ha/beacon_now/command")) {
+    sendBeacon("mqtt");
+    return;
+  }
+  if (topic.endsWith("/ha/beacon_enabled/set")) {
+    if (payload.equalsIgnoreCase("ON")) {
+      handleCommand("beacon on");
+    } else if (payload.equalsIgnoreCase("OFF")) {
+      handleCommand("beacon off");
+    }
+    return;
+  }
+}
+
+String simpleJsonOk(const String& message) {
+  String out;
+  out.reserve(message.length() + 32);
+  out += "{\"ok\":true,\"message\":";
+  appendJsonQuoted(out, message);
+  out += '}';
+  return out;
+}
+
+void handleApiRoot() {
+  gWebServer.send_P(200, "text/html; charset=utf-8", INDEX_HTML);
+}
+
+void handleApiState() {
+  uint32_t since = 0;
+  if (gWebServer.hasArg("since")) {
+    since = static_cast<uint32_t>(gWebServer.arg("since").toInt());
+  }
+  gWebServer.send(200, "application/json; charset=utf-8", buildApiStateJson(since));
+}
+
+void handleApiCommand() {
+  if (!gWebServer.hasArg("cmd")) {
+    gWebServer.send(400, "application/json; charset=utf-8", "{\"ok\":false,\"message\":\"missing cmd\"}");
+    return;
+  }
+  handleCommand(gWebServer.arg("cmd"));
+  gWebServer.send(200, "application/json; charset=utf-8", simpleJsonOk("command accepted"));
+}
+
+void handleApiSend() {
+  if (!gWebServer.hasArg("text")) {
+    gWebServer.send(400, "application/json; charset=utf-8", "{\"ok\":false,\"message\":\"missing text\"}");
+    return;
+  }
+  sendMessage(gWebServer.arg("text"));
+  gWebServer.send(200, "application/json; charset=utf-8", simpleJsonOk("message queued"));
+}
+
+void handleApiWifi() {
+  if (gWebServer.hasArg("mode") && gWebServer.arg("mode").equalsIgnoreCase("off")) {
+    disconnectWifi();
+    gWebServer.send(200, "application/json; charset=utf-8", simpleJsonOk("wifi off"));
+    return;
+  }
+
+  if (gWebServer.hasArg("ssid")) {
+    copyString(gWifiConfig.ssid, sizeof(gWifiConfig.ssid), gWebServer.arg("ssid"));
+  }
+  if (gWebServer.hasArg("password")) {
+    copyString(gWifiConfig.password, sizeof(gWifiConfig.password), gWebServer.arg("password"));
+  }
+  saveWifiPrefs();
+
+  if (gWebServer.hasArg("connect") && gWebServer.arg("connect") == "1") {
+    connectWifi(true);
+  }
+
+  gWebServer.send(200, "application/json; charset=utf-8", simpleJsonOk("wifi updated"));
+}
+
+void handleApiMqtt() {
+  if (gWebServer.hasArg("host")) {
+    copyString(gMqttConfig.host, sizeof(gMqttConfig.host), gWebServer.arg("host"));
+  }
+  if (gWebServer.hasArg("port")) {
+    int port = gWebServer.arg("port").toInt();
+    if (port >= 1 && port <= 65535) {
+      gMqttConfig.port = static_cast<uint16_t>(port);
+    }
+  }
+  if (gWebServer.hasArg("user")) {
+    copyString(gMqttConfig.user, sizeof(gMqttConfig.user), gWebServer.arg("user"));
+  }
+  if (gWebServer.hasArg("password")) {
+    copyString(gMqttConfig.password, sizeof(gMqttConfig.password), gWebServer.arg("password"));
+  }
+  if (gWebServer.hasArg("topic") && !gWebServer.arg("topic").isEmpty()) {
+    copyString(gMqttConfig.baseTopic, sizeof(gMqttConfig.baseTopic), gWebServer.arg("topic"));
+  }
+  saveMqttPrefs();
+  gMqttDiscoveryPublished = false;
+  if (gMqttClient.connected()) {
+    gMqttClient.disconnect();
+  }
+  markMqttStateDirty(true);
+  gWebServer.send(200, "application/json; charset=utf-8", simpleJsonOk("mqtt updated"));
+}
+
+void setupWebServerRoutes() {
+  gWebServer.on("/", HTTP_GET, handleApiRoot);
+  gWebServer.on("/api/state", HTTP_GET, handleApiState);
+  gWebServer.on("/api/command", HTTP_POST, handleApiCommand);
+  gWebServer.on("/api/send", HTTP_POST, handleApiSend);
+  gWebServer.on("/api/wifi", HTTP_POST, handleApiWifi);
+  gWebServer.on("/api/mqtt", HTTP_POST, handleApiMqtt);
+  gWebServer.onNotFound([]() {
+    gWebServer.send(404, "application/json; charset=utf-8", "{\"ok\":false,\"message\":\"not found\"}");
+  });
+}
+
+void ensureWebServerState() {
+  const bool wifiUp = WiFi.status() == WL_CONNECTED;
+  if (wifiUp && !gWebServerStarted) {
+    gWebServer.begin();
+    gWebServerStarted = true;
+    emitEvent("WEB", "STATE=STARTED|IP=" + ipToString(WiFi.localIP()));
+  } else if (!wifiUp && gWebServerStarted) {
+    gWebServer.stop();
+    gWebServerStarted = false;
+    emitEvent("WEB", "STATE=STOPPED");
+  }
+}
+
 void pollSerial() {
   while (Serial.available() > 0) {
     char ch = static_cast<char>(Serial.read());
@@ -1194,7 +2071,11 @@ void setup() {
   gPrefs.begin("esplora", false);
   loadWifiPrefs();
   setupIdentity();
+  loadMqttPrefs();
   applyProfile("balanced");
+  gMqttClient.setBufferSize(4096);
+  gMqttClient.setCallback(mqttCallback);
+  setupWebServerRoutes();
 
   emitLog("esplora boot");
   emitEvent(
@@ -1212,11 +2093,19 @@ void setup() {
   } else {
     emitEvent("WIFI", "STATE=SKIPPED|TARGET_IP=" + ipToString(gWifiConfig.localIp));
   }
+  ensureWebServerState();
   printStatus();
+  printMqttStatus();
 }
 
 void loop() {
   pollSerial();
+
+  ensureWebServerState();
+  if (gWebServerStarted) {
+    gWebServer.handleClient();
+  }
+  mqttLoop();
 
   if (gReceivedFlag) {
     handleReceivedPacket();
