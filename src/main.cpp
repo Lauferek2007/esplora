@@ -8,6 +8,7 @@
 
 #include <ctype.h>
 #include <math.h>
+#include <stdlib.h>
 
 #include "web_panel.h"
 
@@ -1851,6 +1852,7 @@ void printHelp() {
   emitLine("HELP|set bw <kHz>");
   emitLine("HELP|set sf <7-12>");
   emitLine("HELP|set cr <5-8>");
+  emitLine("HELP|set sync <12|34>");
   emitLine("HELP|set power <dBm>");
   emitLine("HELP|set name <nazwa>");
   emitLine("HELP|raw on|off");
@@ -2206,6 +2208,25 @@ void handleCommand(const String& input) {
     gConfig.codingRate = static_cast<uint8_t>(value);
     if (reconfigureRadio()) {
       emitOk("cr=" + String(gConfig.codingRate));
+    }
+    return;
+  }
+
+  if (line.startsWith("set sync ")) {
+    String valueText = line.substring(9);
+    valueText.trim();
+    if (valueText.startsWith("0x") || valueText.startsWith("0X")) {
+      valueText = valueText.substring(2);
+    }
+    char* endPtr = nullptr;
+    unsigned long value = strtoul(valueText.c_str(), &endPtr, 16);
+    if (valueText.isEmpty() || endPtr == nullptr || *endPtr != '\0' || value > 0xFFUL) {
+      emitError("sync out of range, use hex like 12 or 34");
+      return;
+    }
+    gConfig.syncWord = static_cast<uint8_t>(value);
+    if (reconfigureRadio()) {
+      emitOk("sync=0x" + String(gConfig.syncWord, HEX));
     }
     return;
   }

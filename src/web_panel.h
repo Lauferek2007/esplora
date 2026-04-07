@@ -729,6 +729,26 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
               <button class="chip" data-profile="balanced" type="button">Zrównoważony</button>
               <button class="chip" data-profile="long" type="button">Daleki Zasięg</button>
             </div>
+            <div class="config-grid" style="margin-top:14px;">
+              <div class="mini-note">Dla laika: profil zmienia szybkość i zasięg. Częstotliwość to kanał. Sieć prywatna/publiczna zmienia sync word, czyli to z jakim "językiem radiowym" próbujesz gadać.</div>
+              <select id="air-freq">
+                <option value="867.1">867.100 MHz</option>
+                <option value="867.3">867.300 MHz</option>
+                <option value="867.5">867.500 MHz</option>
+                <option value="867.7">867.700 MHz</option>
+                <option value="867.9">867.900 MHz</option>
+                <option value="868.1" selected>868.100 MHz</option>
+                <option value="868.3">868.300 MHz</option>
+                <option value="868.5">868.500 MHz</option>
+                <option value="869.525">869.525 MHz</option>
+              </select>
+              <select id="air-network">
+                <option value="private" selected>Prywatna / DIY (sync 0x12)</option>
+                <option value="public">Publiczna / LoRaWAN (sync 0x34)</option>
+              </select>
+              <button class="secondary" id="air-apply-btn" type="button">Ustaw Kanał i Sieć</button>
+              <div class="mini-note" id="air-summary">Prywatna = własne moduły i eksperymenty. Publiczna = częściej spotykane ramki LoRaWAN/public.</div>
+            </div>
             <div class="control-grid" style="margin-top:14px;">
               <div class="inline-actions">
                 <button class="secondary" id="beacon-toggle-btn" type="button">Przełącz Beacon</button>
@@ -806,8 +826,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       "stat-neighbors", "stat-neighbors-meta", "stat-wifi-rssi", "stat-wifi-meta",
       "stat-last-rx", "stat-last-rx-meta", "stat-uptime", "stat-uptime-meta",
       "dot-radio", "dot-wifi", "dot-mqtt", "pill-radio", "pill-wifi", "pill-mqtt",
-      "scanner", "scanner-summary", "sightings", "sightings-summary", "logs", "chat-text", "radio-summary", "wifi-summary", "mqtt-summary",
-      "wifi-ssid", "wifi-pass", "mqtt-host", "mqtt-port", "mqtt-user", "mqtt-pass", "mqtt-topic"
+      "scanner", "scanner-summary", "sightings", "sightings-summary", "logs", "chat-text", "radio-summary", "air-summary", "wifi-summary", "mqtt-summary",
+      "wifi-ssid", "wifi-pass", "mqtt-host", "mqtt-port", "mqtt-user", "mqtt-pass", "mqtt-topic", "air-freq", "air-network"
     ];
     const el = Object.fromEntries(ids.map((id) => [id, document.getElementById(id)]));
 
@@ -854,6 +874,13 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
     async function sendCommand(cmd) {
       await postForm("/api/command", { cmd });
+      await refresh(true);
+    }
+
+    async function sendCommands(commands) {
+      for (const cmd of commands) {
+        await postForm("/api/command", { cmd });
+      }
       await refresh(true);
     }
 
@@ -983,6 +1010,16 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       return `Ostatni sweep sprawdził ${status.lastSweepChecks} popularnych presetów EU868 i nie wykrył żadnej preambuły LoRa, ${fmtSeconds(status.lastSweepAgeSec)} temu.`;
     }
 
+    function networkFromSync(syncWord) {
+      const sync = String(syncWord || "").toLowerCase();
+      return sync === "34" ? "public" : "private";
+    }
+
+    function frequencyOptionValue(freq) {
+      const num = Number(freq);
+      return Number.isFinite(num) ? String(num) : "868.1";
+    }
+
     function render(data) {
       const payload = data.payload || {};
       const status = payload.status || {};
@@ -1032,12 +1069,17 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         ? `Zdekodowane węzły Esplora na ${status.frequencyMhz} MHz / SF${status.spreadingFactor}, posortowane od najświeższych.`
         : `Na ${status.frequencyMhz} MHz / SF${status.spreadingFactor} nie ma jeszcze zdekodowanych sąsiadów Esplora.`;
       el["sightings-summary"].textContent = sweepSummary(status);
+      el["air-summary"].textContent = networkFromSync(status.syncWord) === "public"
+        ? "Tryb publiczny: sync 0x34. Spróbuj go, jeśli chcesz podsłuchiwać bardziej publiczne / LoRaWAN-owe ramki."
+        : "Tryb prywatny: sync 0x12. Najlepszy do własnych modułów, eksperymentów i pakietów Esplora.";
 
       syncInputValue(el["wifi-ssid"], wifi.ssid || "");
       syncInputValue(el["mqtt-host"], mqtt.host || "");
       syncInputValue(el["mqtt-port"], mqtt.port || 1883);
       syncInputValue(el["mqtt-user"], mqtt.user || "");
       syncInputValue(el["mqtt-topic"], mqtt.baseTopic || "");
+      syncInputValue(el["air-freq"], frequencyOptionValue(status.frequencyMhz));
+      syncInputValue(el["air-network"], networkFromSync(status.syncWord));
 
       renderProfiles(status.profile || "");
       renderNeighbors(model.neighbors);
@@ -1078,6 +1120,14 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     document.getElementById("beacon-now-btn").addEventListener("click", () => sendCommand("beacon now"));
     document.getElementById("cad-btn").addEventListener("click", () => sendCommand("cad"));
     document.getElementById("sweep-btn").addEventListener("click", () => sendCommand("sweep"));
+    document.getElementById("air-apply-btn").addEventListener("click", async () => {
+      const freq = el["air-freq"].value;
+      const sync = el["air-network"].value === "public" ? "34" : "12";
+      await sendCommands([
+        `set freq ${freq}`,
+        `set sync ${sync}`
+      ]);
+    });
     document.getElementById("beacon-toggle-btn").addEventListener("click", () => sendCommand("beacon toggle"));
     document.getElementById("raw-toggle-btn").addEventListener("click", () => sendCommand("raw toggle"));
     document.getElementById("clear-log-btn").addEventListener("click", () => {
